@@ -381,10 +381,18 @@ def brief_command(run_id: str, db: Path = DEFAULT_DB, json_output: bool = False)
     _print_json(data) if json_output else _print_brief(data)
 
 
-def watch_command(run_id: str, interval: float = 5.0, db: Path = DEFAULT_DB) -> None:
+def watch_command(
+    run_id: str,
+    interval: float = 5.0,
+    db: Path = DEFAULT_DB,
+    refresh_lease: bool = True,
+    lease_ttl_sec: int = 90,
+) -> None:
     service, _ = _service(db, None)
     last_line = None
     while True:
+        if refresh_lease:
+            service.tool_refresh_consensus_lease(run_id, lease_ttl_sec)
         brief = service.tool_get_consensus_brief(run_id)
         run = service.db.get_run(run_id)
         line = f"{run.updated_at} {run.run_id} {_progress_line(brief)}"
@@ -601,8 +609,10 @@ if typer is not None:
         run_id: str,
         interval: float = typer.Option(5.0, "--interval"),
         db: Path = typer.Option(DEFAULT_DB, "--db"),
+        refresh_lease: bool = typer.Option(True, "--refresh-lease/--no-refresh-lease"),
+        lease_ttl_sec: int = typer.Option(90, "--lease-ttl-sec"),
     ) -> None:
-        watch_command(run_id, interval, db)
+        watch_command(run_id, interval, db, refresh_lease, lease_ttl_sec)
 
     @app.command("transcript")
     def typer_transcript(
@@ -678,6 +688,8 @@ else:
         watch_p.add_argument("run_id")
         watch_p.add_argument("--interval", type=float, default=5.0)
         watch_p.add_argument("--db", type=Path, default=DEFAULT_DB)
+        watch_p.add_argument("--no-refresh-lease", action="store_true")
+        watch_p.add_argument("--lease-ttl-sec", type=int, default=90)
 
         args = parser.parse_args()
         if args.command == "init":
@@ -723,7 +735,7 @@ else:
         elif args.command == "brief":
             brief_command(args.run_id, args.db, args.json)
         elif args.command == "watch":
-            watch_command(args.run_id, args.interval, args.db)
+            watch_command(args.run_id, args.interval, args.db, not args.no_refresh_lease, args.lease_ttl_sec)
         elif args.command == "transcript":
             transcript_command(args.run_id, args.db, args.json)
         elif args.command == "approve":

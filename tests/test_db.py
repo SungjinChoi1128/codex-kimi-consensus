@@ -13,6 +13,26 @@ def test_run_creation(tmp_path):
     assert loaded.objective == "review this"
     assert loaded.status == RunStatus.INIT
     assert loaded.version == 0
+    assert loaded.lease_mode == "detached"
+    assert loaded.lease_expires_at is None
+
+
+def test_attached_run_lease_can_refresh_without_version_bump(tmp_path):
+    db = Database(tmp_path / "consensus.sqlite")
+    db.init()
+    run = db.create_run("review this", str(tmp_path), "approval-gated", lease_mode="attached", lease_ttl_seconds=5)
+
+    refreshed = db.refresh_run_lease(run.run_id, ttl_seconds=30)
+
+    assert refreshed.lease_mode == "attached"
+    assert refreshed.lease_expires_at is not None
+    assert refreshed.version == 0
+    events = db.transcript(run.run_id).events
+    assert [event.event_type for event in events] == [
+        "run.created",
+        "run.lease_started",
+        "run.lease_refreshed",
+    ]
 
 
 def test_transition_increments_version_and_events_are_ordered(tmp_path):

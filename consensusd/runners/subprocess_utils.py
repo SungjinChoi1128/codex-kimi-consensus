@@ -69,16 +69,25 @@ def run_cancellable_command(
 def _terminate_process_group(process: subprocess.Popen[str], grace_sec: float = 5.0) -> None:
     if process.poll() is not None:
         return
+    _signal_process(process, signal.SIGTERM)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
     deadline = time.monotonic() + grace_sec
     while process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.1)
     if process.poll() is not None:
         return
+    _signal_process(process, signal.SIGKILL)
     try:
         os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def _signal_process(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+    try:
+        process.send_signal(sig)
     except ProcessLookupError:
         return

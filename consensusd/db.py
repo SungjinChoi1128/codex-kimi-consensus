@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional, Union
 
@@ -30,6 +30,14 @@ class ConcurrencyError(RuntimeError):
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utcnow_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_after(seconds: int) -> str:
+    return (utcnow_dt() + timedelta(seconds=seconds)).isoformat()
 
 
 def new_id(prefix: str) -> str:
@@ -66,6 +74,8 @@ class Database:
                   status TEXT NOT NULL,
                   mode TEXT NOT NULL,
                   runner_mode TEXT NOT NULL DEFAULT 'mock',
+                  lease_mode TEXT NOT NULL DEFAULT 'detached',
+                  lease_expires_at TEXT NULL,
                   max_rounds INTEGER NOT NULL DEFAULT 5,
                   current_round INTEGER NOT NULL DEFAULT 1,
                   version INTEGER NOT NULL DEFAULT 0,
@@ -137,6 +147,8 @@ class Database:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
             if "runner_mode" not in columns:
                 conn.execute("ALTER TABLE runs ADD COLUMN runner_mode TEXT NOT NULL DEFAULT 'mock'")
+            self._ensure_column(conn, "runs", "lease_mode", "TEXT NOT NULL DEFAULT 'detached'")
+            self._ensure_column(conn, "runs", "lease_expires_at", "TEXT NULL")
             self._ensure_column(conn, "proposals", "runner", "TEXT NOT NULL DEFAULT 'unknown'")
             self._ensure_column(conn, "reviews", "runner", "TEXT NOT NULL DEFAULT 'unknown'")
             self._ensure_column(conn, "omx_plans", "runner", "TEXT NOT NULL DEFAULT 'unknown'")
@@ -149,8 +161,13 @@ class Database:
         mode: str,
         max_rounds: int = 5,
         runner_mode: str = "mock",
+        lease_mode: str = "detached",
+        lease_ttl_seconds: Optional[int] = None,
     ) -> Run:
         now = utcnow()
+        if lease_mode not in {"detached", "attached"}:
+            raise ValueError("lease_mode must be 'detached' or 'attached'")
+        lease_expires_at = iso_after(lease_ttl_seconds or 90) if lease_mode == "attached" else None
         run = Run(
             run_id=new_id("run"),
             project_root=str(Path(project_root).resolve()),
@@ -158,6 +175,8 @@ class Database:
             status=RunStatus.INIT,
             mode=mode,
             runner_mode=runner_mode,
+            lease_mode=lease_mode,
+            lease_expires_at=lease_expires_at,
             max_rounds=max_rounds,
             created_at=now,
             updated_at=now,
@@ -165,9 +184,9 @@ class Database:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO runs(run_id, project_root, objective, status, mode, runner_mode, max_rounds,
+                INSERT INTO runs(run_id, project_root, objective, status, mode, runner_mode, lease_mode, lease_expires_at, max_rounds,
                   current_round, version, created_at, updated_at, locked_at, error)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.run_id,
@@ -176,6 +195,8 @@ class Database:
                     run.status,
                     run.mode,
                     run.runner_mode,
+                    run.lease_mode,
+                    run.lease_expires_at,
                     run.max_rounds,
                     run.current_round,
                     run.version,
@@ -186,6 +207,16 @@ class Database:
                 ),
             )
             self._append_event(conn, run.run_id, "run.created", run.model_dump(mode="json"))
+            if run.lease_mode == "attached":
+                self._append_event(
+                    conn,
+                    run.run_id,
+                    "run.lease_started",
+                    {
+                        "lease_mode": run.lease_mode,
+                        "lease_expires_at": run.lease_expires_at,
+                    },
+                )
         return run
 
     def get_run(self, run_id: str) -> Run:
@@ -244,6 +275,28 @@ class Database:
                     "error": error,
                     "current_round": current_round,
                 },
+            )
+        return self.get_run(run_id)
+
+    def refresh_run_lease(self, run_id: str, ttl_seconds: int = 90) -> Run:
+        ttl_seconds = max(5, min(ttl_seconds, 3600))
+        expires_at = iso_after(ttl_seconds)
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if not row:
+                raise KeyError(f"run not found: {run_id}")
+            run = self._run(row)
+            if run.lease_mode != "attached" or run.status in {RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.RALPH_HANDOFF_COMPLETE}:
+                return run
+            # Heartbeats are liveness metadata, not workflow-state transitions.
+            # They intentionally do not bump `version`, so they cannot race with
+            # proposal/review/OMX optimistic concurrency checks.
+            conn.execute("UPDATE runs SET lease_expires_at = ? WHERE run_id = ?", (expires_at, run_id))
+            self._append_event(
+                conn,
+                run_id,
+                "run.lease_refreshed",
+                {"lease_mode": "attached", "lease_expires_at": expires_at},
             )
         return self.get_run(run_id)
 

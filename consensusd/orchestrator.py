@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional, TypeVar
 
@@ -122,6 +123,8 @@ class Orchestrator:
     def _tick_unlocked(self) -> None:
         for run in self.db.list_active_runs():
             try:
+                if self._cancel_if_lease_expired(run.run_id):
+                    continue
                 self.advance(run)
             except RunnerCancelled:
                 latest = self.db.get_run(run.run_id)
@@ -325,7 +328,7 @@ class Orchestrator:
         errors: list[BaseException] = []
 
         def target() -> None:
-            token = set_cancel_check(lambda: is_terminal(self.db.get_run(run.run_id).status))
+            token = set_cancel_check(lambda: self._runner_should_cancel(run.run_id))
             try:
                 result.append(call())
             except BaseException as exc:  # noqa: BLE001 - re-raised after heartbeat loop
@@ -341,6 +344,8 @@ class Orchestrator:
         try:
             while worker.is_alive():
                 worker.join(timeout=join_interval)
+                if worker.is_alive() and self._cancel_if_lease_expired(run.run_id):
+                    worker.join(timeout=min(join_interval, 1.0))
                 if worker.is_alive() and interval > 0:
                     heartbeats += 1
                     self._phase_event(
@@ -369,6 +374,36 @@ class Orchestrator:
             raise RunnerCancelled(f"{event_prefix} stopped because run is {latest_status.value}")
         self._phase_event(run, f"{event_prefix}.completed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
         return result[0]
+
+    def _runner_should_cancel(self, run_id: str) -> bool:
+        if self._cancel_if_lease_expired(run_id):
+            return True
+        return is_terminal(self.db.get_run(run_id).status)
+
+    def _cancel_if_lease_expired(self, run_id: str) -> bool:
+        latest = self.db.get_run(run_id)
+        if is_terminal(latest.status):
+            return True
+        if latest.lease_mode != "attached" or not latest.lease_expires_at:
+            return False
+        if parse_utc_iso(latest.lease_expires_at) > datetime.now(timezone.utc):
+            return False
+        self.db.add_event(
+            run_id,
+            "run.lease_expired",
+            {
+                "lease_mode": latest.lease_mode,
+                "lease_expires_at": latest.lease_expires_at,
+                "status": latest.status.value,
+            },
+        )
+        self.db.transition_run(
+            run_id,
+            RunStatus.CANCELLED,
+            expected_version=latest.version,
+            error="attached client heartbeat expired",
+        )
+        return True
 
     def _cancel_run_if_active(self, run_id: str, error: str | None = None) -> None:
         latest = self.db.get_run(run_id)
@@ -402,6 +437,13 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return str(path)
+
+
+def parse_utc_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def build_context_bridge_markdown(transcript, path: str) -> str:

@@ -152,6 +152,7 @@ async def test_mcp_lists_consensus_tools(tmp_path):
     assert "start_consensus_review" in names
     assert "get_consensus_brief" in names
     assert "watch_consensus_progress" in names
+    assert "refresh_consensus_lease" in names
     assert "approve_ralph_handoff" in names
 
 
@@ -219,6 +220,7 @@ def test_legacy_role_permission_rejects_wrong_tool(tmp_path):
 def test_review_rejection_and_approval_paths_via_service(tmp_path):
     settings, app = make_app(tmp_path)
     service = app.state.service
+    service.orchestrator = None
     run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
     r1 = service.db.transition_run(run.run_id, RunStatus.AWAITING_CODEX_PROPOSAL, expected_version=0)
     r1 = service.db.transition_run(run.run_id, RunStatus.CODEX_DRAFTING, expected_version=r1.version)
@@ -341,6 +343,34 @@ def test_watch_consensus_progress_surfaces_live_revision_changed_files(tmp_path)
 
     assert progress["latest"]["phase"] == "codex.revision"
     assert progress["latest"]["changed_files"] == ["src/guard.mjs", "tests/guard.test.mjs"]
+
+
+def test_start_review_can_attach_lease_and_watch_refreshes_it(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    service.orchestrator = None
+    result = service.tool_start_consensus_review(
+        "review diff",
+        str(tmp_path),
+        lease_mode="attached",
+        lease_ttl_seconds=5,
+    )
+
+    before = service.db.get_run(result["run_id"])
+    progress = service.tool_watch_consensus_progress(
+        result["run_id"],
+        wait_seconds=1,
+        interval_seconds=1,
+        refresh_lease=True,
+        lease_ttl_seconds=30,
+    )
+    after = service.db.get_run(result["run_id"])
+
+    assert result["lease_mode"] == "attached"
+    assert before.lease_expires_at is not None
+    assert after.lease_expires_at is not None
+    assert after.lease_expires_at > before.lease_expires_at
+    assert progress["lease_refreshed"] is True
 
 
 def test_consensus_brief_includes_failed_run_error(tmp_path):

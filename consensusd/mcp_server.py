@@ -47,15 +47,21 @@ class ConsensusService:
         project_root: Optional[str] = None,
         mode: str = "approval-gated",
         max_rounds: int = 5,
+        lease_mode: str = "detached",
+        lease_ttl_seconds: int = 90,
     ) -> dict[str, Any]:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
+        if lease_mode not in {"detached", "attached"}:
+            raise ValueError("lease_mode must be 'detached' or 'attached'")
         run = self.db.create_run(
             objective,
             project_root or str(self.settings.project_root),
             mode,
             max_rounds,
             runner_mode=self.settings.runner_mode,
+            lease_mode=lease_mode,
+            lease_ttl_seconds=lease_ttl_seconds,
         )
         if self.orchestrator:
             self.orchestrator.start_background()
@@ -63,6 +69,8 @@ class ConsensusService:
             "run_id": run.run_id,
             "status": run.status.value,
             "runner_mode": self.settings.runner_mode,
+            "lease_mode": run.lease_mode,
+            "lease_expires_at": run.lease_expires_at,
             "watch": f"consensusd watch {run.run_id} --db {self.settings.db_path}",
             "note": runner_mode_note(self.settings.runner_mode),
         }
@@ -77,15 +85,34 @@ class ConsensusService:
     def tool_get_consensus_brief(self, run_id: str) -> dict[str, Any]:
         return build_consensus_brief(self.db.transcript(run_id))
 
-    def tool_watch_consensus_progress(self, run_id: str, wait_seconds: int = 30, interval_seconds: int = 5) -> dict[str, Any]:
+    def tool_refresh_consensus_lease(self, run_id: str, lease_ttl_seconds: int = 90) -> dict[str, Any]:
+        run = self.db.refresh_run_lease(run_id, ttl_seconds=lease_ttl_seconds)
+        return {
+            "run_id": run.run_id,
+            "status": run.status.value,
+            "lease_mode": run.lease_mode,
+            "lease_expires_at": run.lease_expires_at,
+        }
+
+    def tool_watch_consensus_progress(
+        self,
+        run_id: str,
+        wait_seconds: int = 30,
+        interval_seconds: int = 5,
+        refresh_lease: bool = True,
+        lease_ttl_seconds: int = 90,
+    ) -> dict[str, Any]:
         wait_seconds = max(1, min(wait_seconds, 120))
         interval_seconds = max(1, min(interval_seconds, wait_seconds))
+        lease_ttl_seconds = max(5, min(lease_ttl_seconds, 3600))
         deadline = time.monotonic() + wait_seconds
         samples: list[dict[str, Any]] = []
         last_signature: tuple[Any, ...] | None = None
         terminal = False
 
         while True:
+            if refresh_lease:
+                self.db.refresh_run_lease(run_id, ttl_seconds=lease_ttl_seconds)
             brief = self.tool_get_consensus_brief(run_id)
             event = brief.get("latest_phase_event") or {}
             payload = event.get("payload", {}) if isinstance(event, dict) else {}
@@ -111,6 +138,7 @@ class ConsensusService:
                     "run_id": run_id,
                     "terminal": terminal,
                     "elapsed_wait_seconds": wait_seconds,
+                    "lease_refreshed": refresh_lease,
                     "latest": progress_sample(brief),
                     "samples": samples,
                 }
@@ -126,6 +154,11 @@ class ConsensusService:
         run = self.db.get_run(run_id)
         if is_terminal(run.status):
             return run.model_dump(mode="json")
+        self.db.add_event(
+            run_id,
+            "run.cancel_requested",
+            {"status": run.status.value, "version": run.version},
+        )
         updated = self.db.transition_run(run_id, RunStatus.CANCELLED, expected_version=run.version)
         return updated.model_dump(mode="json")
 
@@ -253,6 +286,8 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
         project_root: Optional[str] = None,
         mode: str = "approval-gated",
         max_rounds: int = 5,
+        lease_mode: str = "detached",
+        lease_ttl_seconds: int = 90,
     ) -> dict[str, Any]:
         return call(
             "start_consensus_review",
@@ -261,6 +296,8 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
             project_root=project_root,
             mode=mode,
             max_rounds=max_rounds,
+            lease_mode=lease_mode,
+            lease_ttl_seconds=lease_ttl_seconds,
         )
 
     @mcp.tool()
@@ -277,6 +314,8 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
         ctx: Context,
         wait_seconds: int = 30,
         interval_seconds: int = 5,
+        refresh_lease: bool = True,
+        lease_ttl_seconds: int = 90,
     ) -> dict[str, Any]:
         return call(
             "watch_consensus_progress",
@@ -284,7 +323,13 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
             run_id=run_id,
             wait_seconds=wait_seconds,
             interval_seconds=interval_seconds,
+            refresh_lease=refresh_lease,
+            lease_ttl_seconds=lease_ttl_seconds,
         )
+
+    @mcp.tool()
+    def refresh_consensus_lease(run_id: str, ctx: Context, lease_ttl_seconds: int = 90) -> dict[str, Any]:
+        return call("refresh_consensus_lease", ctx, run_id=run_id, lease_ttl_seconds=lease_ttl_seconds)
 
     @mcp.tool()
     def get_consensus_transcript(run_id: str, ctx: Context) -> dict[str, Any]:
@@ -416,6 +461,8 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
         "status": run.status.value,
         "error": run.error,
         "runner_mode": run.runner_mode,
+        "lease_mode": run.lease_mode,
+        "lease_expires_at": run.lease_expires_at,
         "round": run.current_round,
         "max_rounds": run.max_rounds,
         "objective": run.objective,
@@ -457,6 +504,8 @@ def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
         "phase": brief["current_phase"],
         "round": brief["round"],
         "max_rounds": brief["max_rounds"],
+        "lease_mode": brief.get("lease_mode"),
+        "lease_expires_at": brief.get("lease_expires_at"),
         "heartbeat": heartbeat,
         "elapsed_seconds": elapsed,
         "latest_event": event.get("event_type") if isinstance(event, dict) else None,

@@ -72,6 +72,8 @@ enabled_tools = [
   "start_consensus_review",
   "get_consensus_status",
   "get_consensus_brief",
+  "watch_consensus_progress",
+  "refresh_consensus_lease",
   "get_consensus_transcript",
   "cancel_consensus_review",
   "approve_ralph_handoff"
@@ -131,10 +133,10 @@ Start a consensus review for the current diff. Objective: safely refactor the au
 Codex should call:
 
 ```text
-start_consensus_review(objective, project_root, mode="approval-gated")
+start_consensus_review(objective, project_root, mode="approval-gated", lease_mode="attached", lease_ttl_seconds=90)
 ```
 
-The tool returns a `run_id` and a watch command.
+The tool returns a `run_id`, lease metadata, and a watch command. Attached leases are the Codex CLI UX guardrail: while Codex is actively waiting, `watch_consensus_progress(..., refresh_lease=true)` keeps the run alive. If the Codex chat/tool wait is interrupted and no heartbeat refresh arrives, consensusd cancels the run and terminates active Codex/Kimi subprocesses.
 
 For user-facing progress, ask Codex for a brief. It should call:
 
@@ -174,6 +176,8 @@ uv run consensusd down --db .consensusd/consensusd.sqlite
 `watch` exits at terminal states or `AWAITING_HUMAN_APPROVAL`.
 
 `brief` is the friendlier default for Codex/App UX. It summarizes the latest phase events and points to the OMX plan/context bridge instead of printing the full SQLite transcript.
+
+For MCP-driven reviews, Codex should use `watch_consensus_progress(run_id, wait_seconds=30, interval_seconds=5, refresh_lease=true, lease_ttl_seconds=90)` rather than raw sleeps. The optional CLI `watch` command also refreshes attached leases by default; pass `--no-refresh-lease` only when deliberately testing lease expiry.
 
 Long runner calls also emit periodic `*.heartbeat` events. Configure the interval with:
 

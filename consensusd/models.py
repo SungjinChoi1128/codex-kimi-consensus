@@ -52,6 +52,8 @@ class Run(BaseModel):
     status: RunStatus
     mode: str
     runner_mode: str = "mock"
+    lease_mode: str = "detached"
+    lease_expires_at: Optional[str] = None
     max_rounds: int = 5
     current_round: int = 1
     version: int = 0
