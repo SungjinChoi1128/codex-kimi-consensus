@@ -1,3 +1,8 @@
+---
+name: consensus-review
+description: Start and monitor consensusd Codex/Kimi consensus reviews, generate OMX plans, and keep Ralph handoff approval-gated.
+---
+
 # Consensus Review
 
 Use this skill when the user asks for consensus review, Kimi review, architect review, OMX generation, Ralph handoff, or multi-agent planning.

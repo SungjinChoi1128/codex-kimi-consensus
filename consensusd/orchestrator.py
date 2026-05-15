@@ -27,9 +27,14 @@ def runner_name(runner: AgentRunner) -> str:
     return runner.__class__.__name__
 
 
-def slugify(text: str, fallback: str) -> str:
+def slugify(text: str, fallback: str, limit: int = 80) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return (slug or fallback)[:80]
+    return (slug or fallback)[:limit]
+
+
+def compact_artifact_name(prefix: str, run: Run) -> str:
+    slug = slugify(run.objective, "consensus-review", limit=40)
+    return f"{prefix}-{run.run_id[-8:]}-{slug}.md"
 
 
 class Orchestrator:
@@ -353,13 +358,11 @@ class Orchestrator:
 
     def _context_bridge_path(self, run: Run) -> str:
         plans_dir = Path(run.project_root) / ".omx" / "plans"
-        slug = slugify(run.objective, "consensus-review")
-        return str(plans_dir / f"kimi-codex-context-bridge-{slug}-{run.run_id}.md")
+        return str(plans_dir / compact_artifact_name("context-bridge", run))
 
     def _write_omx_plan(self, run: Run, content: str) -> str:
         plans_dir = Path(run.project_root) / ".omx" / "plans"
-        slug = slugify(run.objective, "consensus-review")
-        path = plans_dir / f"consensus-omx-plan-{slug}-{run.run_id}.md"
+        path = plans_dir / compact_artifact_name("consensus-omx", run)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return str(path)

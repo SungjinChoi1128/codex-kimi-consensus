@@ -16,7 +16,12 @@ def make_service(tmp_path, max_rounds=5):
     db.init()
     orchestrator = Orchestrator(db, settings)
     service = ConsensusService(db, settings, orchestrator)
-    run = db.create_run("ship consensusd", str(tmp_path), "approval-gated", max_rounds=max_rounds)
+    run = db.create_run(
+        "ship consensusd with a deliberately long objective that should not produce painful artifact filenames",
+        str(tmp_path),
+        "approval-gated",
+        max_rounds=max_rounds,
+    )
     return service, orchestrator, run
 
 
@@ -45,6 +50,10 @@ def test_mock_orchestrator_full_run_to_approval_gate(tmp_path):
     assert [review.status.value for review in transcript.reviews] == ["NEEDS_REVISION", "APPROVED"]
     assert transcript.omx_plans
     assert transcript.context_bridges
+    assert Path(transcript.omx_plans[-1].path).name.startswith("consensus-omx-")
+    assert Path(transcript.context_bridges[-1].path).name.startswith("context-bridge-")
+    assert len(Path(transcript.omx_plans[-1].path).name) < 80
+    assert len(Path(transcript.context_bridges[-1].path).name) < 80
     bridge = transcript.context_bridges[-1]
     assert "Kimi-Codex Context Bridge" in bridge.content
     assert "Review Cycle Summary" in bridge.content
