@@ -1,0 +1,9 @@
+.consensusd/
+.omx/
+.pytest_cache/
+.pycache-check/
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.DS_Store

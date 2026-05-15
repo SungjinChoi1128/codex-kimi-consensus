@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "consensus": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CONSENSUSD_KIMI_TOKEN}"
+      },
+      "enabledTools": [
+        "get_current_state",
+        "get_proposal",
+        "submit_review",
+        "get_git_diff",
+        "list_changed_files",
+        "record_evidence"
+      ]
+    }
+  }
+}

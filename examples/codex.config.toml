@@ -1,0 +1,26 @@
+[mcp_servers.consensus]
+url = "http://127.0.0.1:8787/mcp"
+required = true
+tool_timeout_sec = 120
+bearer_token_env_var = "CONSENSUSD_CONTROL_TOKEN"
+enabled_tools = [
+  "start_consensus_review",
+  "get_consensus_status",
+  "get_consensus_transcript",
+  "cancel_consensus_review",
+  "approve_ralph_handoff"
+]
+
+[mcp_servers.consensus_agent_tools]
+url = "http://127.0.0.1:8787/mcp"
+required = false
+tool_timeout_sec = 120
+bearer_token_env_var = "CONSENSUSD_CODEX_TOKEN"
+enabled_tools = [
+  "get_current_state",
+  "submit_proposal",
+  "finalize_omx",
+  "get_git_diff",
+  "list_changed_files",
+  "record_evidence"
+]

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "consensus": {
+      "url": "http://127.0.0.1:8788/mcp",
+      "enabledTools": [
+        "get_current_state",
+        "get_proposal",
+        "submit_review",
+        "get_git_diff",
+        "list_changed_files",
+        "record_evidence"
+      ]
+    }
+  }
+}
