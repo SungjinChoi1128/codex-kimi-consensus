@@ -774,7 +774,7 @@ DEEP_CONTEXT_FILE_LIMIT = 24
 DEEP_CONTEXT_PER_FILE_LIMIT = 20_000
 RELEVANT_NAME_RE = re.compile(r"(p11b|revolut|readonly|read-only|collector|guard|control-template|key-governance)", re.I)
 CONTEXT_PATH_RE = re.compile(
-    r"(?<![\w/.-])((?:\.?[\w.-]+/)+[\w.@:+-]+\.(?:js|mjs|cjs|ts|json|md|toml|yaml|yml|txt))"
+    r"(?<![\w/.-])((?:\.?[\w.-]+/)+[\w.@:+-]+\.(?:json|toml|yaml|yml|mjs|cjs|js|ts|md|txt))(?!\w)"
 )
 TEXT_SUFFIXES = {
     ".js",

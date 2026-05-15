@@ -443,6 +443,12 @@ def test_extract_context_file_paths_preserves_dot_paths():
     ]
 
 
+def test_extract_context_file_paths_preserves_json_suffix():
+    assert extract_context_file_paths("Use .omx/security/revolut-x-readonly-control-template.json.") == [
+        ".omx/security/revolut-x-readonly-control-template.json"
+    ]
+
+
 def test_deep_context_evidence_excludes_private_local_paths(tmp_path):
     init_git_repo(tmp_path)
     (tmp_path / ".env").write_text("SECRET=do-not-read\n")
