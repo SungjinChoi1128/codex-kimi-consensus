@@ -10,7 +10,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from starlette.testclient import TestClient
 
 from consensusd.mcp_server import create_app, next_action
-from consensusd.models import ReviewStatus, RunStatus
+from consensusd.models import ReviewStatus, RunStatus, ToolRole
 from consensusd.settings import Settings
 
 
@@ -163,6 +163,18 @@ def test_healthz_admin_route(tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_agent_role_endpoint_does_not_start_orchestrator_worker(tmp_path):
+    settings = Settings.from_env(
+        db_path=tmp_path / "consensus.sqlite",
+        project_root=tmp_path,
+        dev_auth_role=ToolRole.KIMI_REVIEWER.value,
+    )
+
+    app = create_app(settings, start_worker=True)
+
+    assert app.state.orchestrator._thread is None
 
 
 def test_legacy_json_shim_available_for_low_level_tests(tmp_path):

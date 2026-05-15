@@ -398,34 +398,46 @@ def review_command(
     orchestrator = Orchestrator(database, settings)
     service = ConsensusService(database, settings, orchestrator=None)
     last_progress = None
-    with orchestrator.exclusive():
-        result = service.tool_start_consensus_review(objective, str(project_root.resolve()), mode, max_rounds)
-        run_id = result["run_id"]
-        if not json_output:
-            print(f"Started consensus review: {run_id}")
-            print(f"Project: {project_root.resolve()}")
-            print(f"Runner: {result.get('runner_mode', 'unknown')}")
-            if result.get("note"):
-                print(f"Note: {result['note']}")
-            print()
-        while True:
-            orchestrator._tick_unlocked()
-            run = service.db.get_run(run_id)
+    run_id: str | None = None
+    try:
+        with orchestrator.exclusive():
+            result = service.tool_start_consensus_review(objective, str(project_root.resolve()), mode, max_rounds)
+            run_id = result["run_id"]
             if not json_output:
-                brief = service.tool_get_consensus_brief(run_id)
-                progress = _progress_line(brief)
-                if progress != last_progress:
-                    print(progress)
-                    last_progress = progress
-            if run.status in {
-                RunStatus.AWAITING_HUMAN_APPROVAL,
-                RunStatus.RALPH_HANDOFF_COMPLETE,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-            }:
-                break
-            time.sleep(interval)
+                print(f"Started consensus review: {run_id}")
+                print(f"Project: {project_root.resolve()}")
+                print(f"Runner: {result.get('runner_mode', 'unknown')}")
+                if result.get("note"):
+                    print(f"Note: {result['note']}")
+                print()
+            while True:
+                orchestrator._tick_unlocked()
+                run = service.db.get_run(run_id)
+                if not json_output:
+                    brief = service.tool_get_consensus_brief(run_id)
+                    progress = _progress_line(brief)
+                    if progress != last_progress:
+                        print(progress)
+                        last_progress = progress
+                if run.status in {
+                    RunStatus.AWAITING_HUMAN_APPROVAL,
+                    RunStatus.RALPH_HANDOFF_COMPLETE,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    break
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        if run_id:
+            try:
+                service.tool_cancel_consensus_review(run_id)
+                print(f"\nCancelled consensus review: {run_id}")
+            except Exception as exc:  # noqa: BLE001 - best-effort shutdown path
+                print(f"\nInterrupted; failed to record cancellation for {run_id}: {exc}")
+        raise typer.Exit(130)
 
+    if run_id is None:
+        raise RuntimeError("review did not start")
     brief = service.tool_get_consensus_brief(run_id)
     transcript = service.tool_get_consensus_transcript(run_id)
     if json_output:

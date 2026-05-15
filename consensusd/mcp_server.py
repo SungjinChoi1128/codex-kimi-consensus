@@ -17,6 +17,7 @@ from .models import ReviewStatus, RunStatus, ToolRequest, ToolResponse, ToolRole
 from .orchestrator import Orchestrator, changed_files_from_diff_stat, run_fixed_git_command
 from .security import ConsensusTokenVerifier, assert_tool_allowed, bearer_token, require_localhost, role_for_token
 from .settings import Settings
+from .state_machine import is_terminal
 
 
 def runner_mode_note(runner_mode: str) -> str:
@@ -123,6 +124,8 @@ class ConsensusService:
 
     def tool_cancel_consensus_review(self, run_id: str) -> dict[str, Any]:
         run = self.db.get_run(run_id)
+        if is_terminal(run.status):
+            return run.model_dump(mode="json")
         updated = self.db.transition_run(run_id, RunStatus.CANCELLED, expected_version=run.version)
         return updated.model_dump(mode="json")
 
@@ -220,7 +223,7 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
     db = Database(settings.db_path)
     db.init()
     orchestrator = Orchestrator(db, settings)
-    if start_worker:
+    if should_start_worker(start_worker, fixed_dev_role):
         orchestrator.start_background()
     service = ConsensusService(db, settings, orchestrator)
     mcp = FastMCP(
@@ -382,6 +385,12 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
     app.state.orchestrator = orchestrator
     app.state.settings = settings
     return app
+
+
+def should_start_worker(start_worker: bool, fixed_dev_role: Optional[ToolRole]) -> bool:
+    if not start_worker:
+        return False
+    return fixed_dev_role not in {ToolRole.CODEX_PLANNER, ToolRole.KIMI_REVIEWER}
 
 
 def build_consensus_brief(transcript) -> dict[str, Any]:

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from typing import Optional
 
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run
+from consensusd.runners.subprocess_utils import run_cancellable_command
 from consensusd.settings import Settings
 
 
@@ -65,30 +65,20 @@ class SubprocessKimiRunner:
             f"timeout={self.settings.subprocess_timeout_sec}s",
             flush=True,
         )
-        process = subprocess.Popen(
+        result = run_cancellable_command(
             command,
             cwd=run.project_root,
-            capture_output=True,
-            text=True,
+            timeout_sec=self.settings.subprocess_timeout_sec,
+            label="kimi subprocess during review",
         )
-        print(f"[consensusd] run={run.run_id} phase=kimi.review pid={process.pid}", flush=True)
-        try:
-            stdout, stderr = process.communicate(timeout=self.settings.subprocess_timeout_sec)
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            stdout, stderr = process.communicate()
-            raise RuntimeError(
-                f"kimi subprocess timed out during review after {self.settings.subprocess_timeout_sec}s; "
-                f"pid={process.pid}; stdout_tail={stdout[-1000:]!r}; stderr_tail={stderr[-1000:]!r}"
-            ) from exc
         print(
             f"[consensusd] run={run.run_id} phase=kimi.review completed "
-            f"pid={process.pid} returncode={process.returncode}",
+            f"pid={result.pid} returncode={result.returncode}",
             flush=True,
         )
-        content = (stdout or "").strip()
-        if process.returncode != 0:
-            details = (stderr or stdout or "").strip()
+        content = (result.stdout or "").strip()
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"kimi subprocess failed during review: {details}")
         if not content:
             raise RuntimeError("kimi subprocess returned empty review")

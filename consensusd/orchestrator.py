@@ -13,7 +13,7 @@ from typing import Callable, Iterator, Optional, TypeVar
 
 from .db import Database
 from .models import Proposal, ReviewStatus, Run, RunStatus
-from .runners.base import AgentRunner, RevisionRunner
+from .runners.base import AgentRunner, RevisionRunner, RunnerCancelled, reset_cancel_check, set_cancel_check
 from .runners.mock import MockCodexRunner, MockKimiRunner
 from .runners.subprocess_codex import SubprocessCodexRunner
 from .runners.subprocess_kimi import SubprocessKimiRunner
@@ -123,6 +123,10 @@ class Orchestrator:
         for run in self.db.list_active_runs():
             try:
                 self.advance(run)
+            except RunnerCancelled:
+                latest = self.db.get_run(run.run_id)
+                if not is_terminal(latest.status):
+                    self.db.transition_run(latest.run_id, RunStatus.CANCELLED, expected_version=latest.version)
             except Exception as exc:
                 latest = self.db.get_run(run.run_id)
                 if not is_terminal(latest.status):
@@ -321,37 +325,56 @@ class Orchestrator:
         errors: list[BaseException] = []
 
         def target() -> None:
+            token = set_cancel_check(lambda: is_terminal(self.db.get_run(run.run_id).status))
             try:
                 result.append(call())
             except BaseException as exc:  # noqa: BLE001 - re-raised after heartbeat loop
                 errors.append(exc)
+            finally:
+                reset_cancel_check(token)
 
         worker = threading.Thread(target=target, daemon=True)
         worker.start()
         heartbeats = 0
         interval = self.settings.heartbeat_interval_sec
-        if interval <= 0:
-            worker.join()
-            interval = 0
-        while worker.is_alive():
-            worker.join(timeout=interval)
-            if worker.is_alive():
-                heartbeats += 1
-                self._phase_event(
-                    run,
-                    f"{event_prefix}.heartbeat",
-                    runner=label,
-                    elapsed_seconds=round(time.monotonic() - started, 3),
-                    heartbeat=heartbeats,
-                    **self._heartbeat_progress_payload(run, event_prefix),
-                )
+        join_interval = interval if interval > 0 else 0.25
+        try:
+            while worker.is_alive():
+                worker.join(timeout=join_interval)
+                if worker.is_alive() and interval > 0:
+                    heartbeats += 1
+                    self._phase_event(
+                        run,
+                        f"{event_prefix}.heartbeat",
+                        runner=label,
+                        elapsed_seconds=round(time.monotonic() - started, 3),
+                        heartbeat=heartbeats,
+                        **self._heartbeat_progress_payload(run, event_prefix),
+                    )
+        except KeyboardInterrupt:
+            self._cancel_run_if_active(run.run_id, error="interrupted by user")
+            worker.join(timeout=5)
+            elapsed = round(time.monotonic() - started, 3)
+            self._phase_event(run, f"{event_prefix}.cancelled", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            raise
 
         elapsed = round(time.monotonic() - started, 3)
+        latest_status = self.db.get_run(run.run_id).status
         if errors:
-            self._phase_event(run, f"{event_prefix}.failed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            suffix = "cancelled" if isinstance(errors[0], RunnerCancelled) or is_terminal(latest_status) else "failed"
+            self._phase_event(run, f"{event_prefix}.{suffix}", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
             raise errors[0]
+        if is_terminal(latest_status):
+            self._phase_event(run, f"{event_prefix}.cancelled", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            raise RunnerCancelled(f"{event_prefix} stopped because run is {latest_status.value}")
         self._phase_event(run, f"{event_prefix}.completed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
         return result[0]
+
+    def _cancel_run_if_active(self, run_id: str, error: str | None = None) -> None:
+        latest = self.db.get_run(run_id)
+        if is_terminal(latest.status):
+            return
+        self.db.transition_run(run_id, RunStatus.CANCELLED, expected_version=latest.version, error=error)
 
     def _heartbeat_progress_payload(self, run: Run, event_prefix: str) -> dict[str, object]:
         if event_prefix != "codex.revision":
