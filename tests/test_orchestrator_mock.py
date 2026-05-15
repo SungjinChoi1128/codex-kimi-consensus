@@ -6,7 +6,14 @@ import time
 from consensusd.db import Database
 from consensusd.mcp_server import ConsensusService
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run, RunStatus
-from consensusd.orchestrator import Orchestrator, editable_path_violation, extract_commit_refs, git_changed_files, build_deep_context_evidence
+from consensusd.orchestrator import (
+    Orchestrator,
+    build_deep_context_evidence,
+    editable_path_violation,
+    extract_commit_refs,
+    git_changed_files,
+    initial_git_evidence_commands,
+)
 from consensusd.settings import Settings
 
 
@@ -275,7 +282,7 @@ def test_git_changed_files_handles_spaces_and_renames(tmp_path):
     assert git_changed_files(str(tmp_path)) == ["new file.txt", "renamed file.txt"]
 
 
-def test_initial_repo_evidence_includes_head_and_objective_commit(tmp_path):
+def test_initial_repo_evidence_anchors_to_objective_commit_without_unrelated_head(tmp_path):
     init_git_repo(tmp_path)
     changed = tmp_path / "p11b.txt"
     changed.write_text("readonly guard\n")
@@ -294,6 +301,16 @@ def test_initial_repo_evidence_includes_head_and_objective_commit(tmp_path):
         capture_output=True,
         text=True,
     ).stdout.strip()
+    cleanup = tmp_path / "consensus-review.skill.md"
+    cleanup.write_text("local agent tooling cleanup\n")
+    subprocess.run(["git", "add", "consensus-review.skill.md"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "clean repo request"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     (tmp_path / "unrelated-dirty.txt").write_text("dirty\n")
 
     settings = Settings(db_path=tmp_path / "consensus.sqlite", project_root=tmp_path)
@@ -312,17 +329,36 @@ def test_initial_repo_evidence_includes_head_and_objective_commit(tmp_path):
     by_kind = {item.kind: item for item in db.list_evidence(run.run_id)}
     assert "git_status_short" in by_kind
     assert "git_diff_stat" in by_kind
-    assert "git_head_summary" in by_kind
-    assert "git_head_name_status" in by_kind
+    assert "git_head_summary" not in by_kind
+    assert "git_head_name_status" not in by_kind
     assert "git_objective_commit_summary" in by_kind
     assert "git_objective_commit_name_status" in by_kind
+    assert "context_scope_note" in by_kind
     assert "objective_commit_diff" in by_kind
     assert "deep_context_file_inventory" in by_kind
     assert "deep_context_file_contents" in by_kind
     assert "unrelated-dirty.txt" in by_kind["git_status_short"].output
+    assert "clean repo request" not in "\n".join(item.output for item in by_kind.values())
+    assert "consensus-review.skill.md" not in by_kind["git_objective_commit_name_status"].output
     assert "p11b.txt" in by_kind["git_objective_commit_name_status"].output
     assert "readonly guard" in by_kind["objective_commit_diff"].output
     assert "p11b.txt" in by_kind["deep_context_file_contents"].output
+
+
+def test_initial_repo_evidence_includes_head_when_no_objective_commit(tmp_path):
+    init_git_repo(tmp_path)
+    changed = tmp_path / "general.txt"
+    changed.write_text("general change\n")
+    subprocess.run(["git", "add", "general.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "general head"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "git_head_summary" in {kind for kind, _, _ in initial_git_evidence_commands("review current diff")}
 
 
 def test_deep_context_evidence_excludes_private_local_paths(tmp_path):

@@ -355,10 +355,21 @@ class Orchestrator:
         heartbeats = 0
         interval = self.settings.heartbeat_interval_sec
         join_interval = interval if interval > 0 else 0.25
+        cancellation_recorded = False
         try:
             while worker.is_alive():
                 worker.join(timeout=join_interval)
                 if worker.is_alive() and self._cancel_if_lease_expired(run.run_id):
+                    elapsed = round(time.monotonic() - started, 3)
+                    self._phase_event(
+                        run,
+                        f"{event_prefix}.cancelled",
+                        runner=label,
+                        elapsed_seconds=elapsed,
+                        heartbeats=heartbeats,
+                        reason="attached client heartbeat expired",
+                    )
+                    cancellation_recorded = True
                     worker.join(timeout=min(join_interval, 1.0))
                 if worker.is_alive() and interval > 0:
                     heartbeats += 1
@@ -381,10 +392,12 @@ class Orchestrator:
         latest_status = self.db.get_run(run.run_id).status
         if errors:
             suffix = "cancelled" if isinstance(errors[0], RunnerCancelled) or is_terminal(latest_status) else "failed"
-            self._phase_event(run, f"{event_prefix}.{suffix}", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            if not cancellation_recorded or suffix != "cancelled":
+                self._phase_event(run, f"{event_prefix}.{suffix}", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
             raise errors[0]
         if is_terminal(latest_status):
-            self._phase_event(run, f"{event_prefix}.cancelled", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            if not cancellation_recorded:
+                self._phase_event(run, f"{event_prefix}.cancelled", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
             raise RunnerCancelled(f"{event_prefix} stopped because run is {latest_status.value}")
         self._phase_event(run, f"{event_prefix}.completed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
         return result[0]
@@ -767,7 +780,23 @@ def build_deep_context_evidence(project_root: str, objective: str) -> list[Evide
     root = Path(project_root)
     items: list[EvidenceItem] = []
     files: list[str] = []
-    for ref in extract_commit_refs(objective)[:2]:
+    commit_refs = extract_commit_refs(objective)[:2]
+    if commit_refs:
+        items.append(
+            {
+                "kind": "context_scope_note",
+                "status": "OK",
+                "command": "consensusd targeted commit scope",
+                "output": (
+                    "This review is anchored to the explicit objective commit(s): "
+                    f"{', '.join(ref.lower() for ref in commit_refs)}.\n"
+                    "Current HEAD commit metadata is intentionally excluded from the proposal context "
+                    "because it may belong to a different interactive session. Use working-tree status "
+                    "only as ambient repo hygiene, not as the review target."
+                ),
+            }
+        )
+    for ref in commit_refs:
         normalized = ref.lower()
         changed = git_commit_changed_files(project_root, normalized)
         files.extend(changed)
@@ -802,12 +831,13 @@ def build_deep_context_evidence(project_root: str, objective: str) -> list[Evide
         )
     package_json = root / "package.json"
     if package_json.is_file():
+        package_context = package_scripts_context(package_json, objective)
         items.append(
             {
                 "kind": "package_scripts_context",
-                "status": "OK",
-                "command": "read package.json scripts",
-                "output": cap_text(package_json.read_text(errors="replace"), 20_000),
+                "status": "OK" if package_context else "SKIPPED",
+                "command": "read relevant package.json scripts",
+                "output": package_context or "(no relevant package scripts found)",
             }
         )
     return items
@@ -921,6 +951,31 @@ def cap_text(text: str, limit: int) -> str:
     return text[:limit].rstrip() + f"\n\n... truncated at {limit} characters by consensusd context cap ..."
 
 
+def package_scripts_context(package_json: Path, objective: str = "") -> str:
+    try:
+        data = json.loads(package_json.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    scripts = data.get("scripts")
+    if not isinstance(scripts, dict):
+        return ""
+    objective_lc = objective.lower()
+    if "p11b" in objective_lc:
+        domain_name = re.compile(r"(p11b|guard|collector)", re.I)
+    else:
+        domain_name = re.compile(r"(revolut|readonly|read-only|guard|collector)", re.I)
+    generic_names = {"test", "check", "check:syntax", "lint", "typecheck", "type:check"}
+    selected: dict[str, str] = {}
+    for key, value in scripts.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if key in generic_names or domain_name.search(f"{key} {value}"):
+            selected[key] = value
+    if not selected:
+        return ""
+    return json.dumps({"scripts": selected}, indent=2, sort_keys=True)
+
+
 def unique_preserve_order(values) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -939,17 +994,28 @@ def initial_git_evidence_commands(objective: str) -> list[tuple[str, str, str]]:
     """Return fixed, safe git evidence commands for a new review run.
 
     The working tree diff alone is misleading after the user has committed the
-    change they want reviewed. We always capture HEAD plus explicit commit refs
-    mentioned in the objective, while still avoiding arbitrary shell execution.
+    change they want reviewed. If the objective names commit refs, we anchor
+    evidence to those refs and avoid HEAD commit metadata because HEAD may be
+    an unrelated cleanup from another interactive session.
     """
+    objective_refs = extract_commit_refs(objective)
     commands: list[tuple[str, str, str]] = [
         ("git_status_short", "git status --short", "(working tree clean)"),
         ("git_diff_stat", "git diff --stat", "(no working-tree diff reported by git diff --stat)"),
-        ("git_head_summary", "git show --stat --oneline --decorate HEAD", "(no HEAD commit summary available)"),
-        ("git_head_name_status", "git show --name-status --oneline --decorate HEAD", "(no HEAD name-status available)"),
     ]
+    if not objective_refs:
+        commands.extend(
+            [
+                ("git_head_summary", "git show --stat --oneline --decorate HEAD", "(no HEAD commit summary available)"),
+                (
+                    "git_head_name_status",
+                    "git show --name-status --oneline --decorate HEAD",
+                    "(no HEAD name-status available)",
+                ),
+            ]
+        )
     seen: set[str] = {"HEAD"}
-    for ref in extract_commit_refs(objective):
+    for ref in objective_refs:
         normalized = ref.lower()
         if normalized in seen:
             continue
