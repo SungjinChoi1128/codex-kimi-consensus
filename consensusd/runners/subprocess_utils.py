@@ -67,23 +67,24 @@ def run_cancellable_command(
 
 
 def _terminate_process_group(process: subprocess.Popen[str], grace_sec: float = 5.0) -> None:
-    if process.poll() is not None:
-        return
+    descendant_pids = _descendant_pids(process.pid)
     _signal_process(process, signal.SIGTERM)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    _signal_pids(descendant_pids, signal.SIGTERM)
     deadline = time.monotonic() + grace_sec
-    while process.poll() is None and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if process.poll() is not None and not _any_pid_running(descendant_pids):
+            return
         time.sleep(0.1)
-    if process.poll() is not None:
-        return
     _signal_process(process, signal.SIGKILL)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return
+        pass
+    _signal_pids(descendant_pids, signal.SIGKILL)
 
 
 def _signal_process(process: subprocess.Popen[str], sig: signal.Signals) -> None:
@@ -91,3 +92,57 @@ def _signal_process(process: subprocess.Popen[str], sig: signal.Signals) -> None
         process.send_signal(sig)
     except ProcessLookupError:
         return
+
+
+def _signal_pids(pids: set[int], sig: signal.Signals) -> None:
+    for pid in sorted(pids, reverse=True):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            continue
+
+
+def _any_pid_running(pids: set[int]) -> bool:
+    return any(_pid_running(pid) for pid in pids)
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _descendant_pids(root_pid: int) -> set[int]:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,ppid=", "-ax"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+    children_by_parent: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        children_by_parent.setdefault(ppid, []).append(pid)
+
+    descendants: set[int] = set()
+    stack = list(children_by_parent.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid in descendants:
+            continue
+        descendants.add(pid)
+        stack.extend(children_by_parent.get(pid, []))
+    return descendants

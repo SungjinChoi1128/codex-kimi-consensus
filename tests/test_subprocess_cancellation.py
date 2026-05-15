@@ -57,6 +57,78 @@ def test_cancellable_subprocess_terminates_process_group(tmp_path):
     assert terminated.read_text() == "terminated"
 
 
+def test_cancellable_subprocess_terminates_detached_child(tmp_path):
+    started = tmp_path / "detached_started.txt"
+    child_pid = tmp_path / "detached_child_pid.txt"
+    child_terminated = tmp_path / "detached_child_terminated.txt"
+    wrapper_terminated = tmp_path / "detached_wrapper_terminated.txt"
+    child_script = tmp_path / "detached_child.py"
+    wrapper_script = tmp_path / "detached_wrapper.py"
+    child_script.write_text(
+        "\n".join(
+            [
+                "import signal",
+                "import os",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                f"child_pid = Path({str(child_pid)!r})",
+                f"child_terminated = Path({str(child_terminated)!r})",
+                "def handle_term(signum, frame):",
+                "    child_terminated.write_text('terminated')",
+                "    sys.exit(0)",
+                "signal.signal(signal.SIGTERM, handle_term)",
+                "child_pid.write_text(str(os.getpid()))",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+    )
+    wrapper_script.write_text(
+        "\n".join(
+            [
+                "import signal",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                f"started = Path({str(started)!r})",
+                f"child_pid = Path({str(child_pid)!r})",
+                f"wrapper_terminated = Path({str(wrapper_terminated)!r})",
+                f"child_script = {str(child_script)!r}",
+                "def handle_term(signum, frame):",
+                "    wrapper_terminated.write_text('terminated')",
+                "    sys.exit(0)",
+                "signal.signal(signal.SIGTERM, handle_term)",
+                "subprocess.Popen([sys.executable, child_script], start_new_session=True)",
+                "deadline = time.monotonic() + 5",
+                "while not child_pid.exists() and time.monotonic() < deadline:",
+                "    time.sleep(0.05)",
+                "started.write_text('started')",
+                "while True:",
+                "    time.sleep(0.1)",
+            ]
+        )
+    )
+
+    token = set_cancel_check(lambda: started.exists())
+    try:
+        with pytest.raises(RunnerCancelled):
+            run_cancellable_command(
+                [sys.executable, str(wrapper_script)],
+                cwd=tmp_path,
+                timeout_sec=10,
+                label="detached wrapper",
+                poll_interval=0.05,
+            )
+    finally:
+        reset_cancel_check(token)
+
+    assert wrapper_terminated.read_text() == "terminated"
+    assert child_terminated.read_text() == "terminated"
+    assert wait_for_pid_exit(int(child_pid.read_text()), timeout=5)
+
+
 def test_orchestrator_cancellation_kills_active_codex_subprocess(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
