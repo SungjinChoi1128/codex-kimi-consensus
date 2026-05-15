@@ -10,6 +10,7 @@ from consensusd.orchestrator import (
     Orchestrator,
     build_deep_context_evidence,
     editable_path_violation,
+    extract_context_file_paths,
     extract_commit_refs,
     git_changed_files,
     initial_git_evidence_commands,
@@ -399,6 +400,47 @@ def test_session_context_without_commit_omits_git_evidence(tmp_path):
     assert "git_head_name_status" not in by_kind
     assert "unrelated dirty cleanup" not in "\n".join(item.output for item in by_kind.values())
     assert "P11B collector context" in by_kind["deep_context_file_contents"].output
+
+
+def test_session_context_file_paths_drive_context_inventory(tmp_path):
+    init_git_repo(tmp_path)
+    (tmp_path / ".omx" / "context").mkdir(parents=True)
+    (tmp_path / ".omx" / "context" / "p11b-ralph.md").write_text("Ralph P11B summary\n")
+    (tmp_path / "src" / "data").mkdir(parents=True)
+    (tmp_path / "src" / "data" / "revolut-x-readonly-collector-guard.mjs").write_text("P11B guard\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "phase10-revolut-x-private-readonly-balance-preflight.test.mjs").write_text("phase10 noise\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "context files"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    evidence = build_deep_context_evidence(
+        str(tmp_path),
+        "review the P11B implementation",
+        session_context=(
+            "Use .omx/context/p11b-ralph.md and "
+            "src/data/revolut-x-readonly-collector-guard.mjs as the review anchor."
+        ),
+    )
+    by_kind = {item["kind"]: item for item in evidence}
+
+    assert by_kind["deep_context_file_inventory"]["command"] == "session_context path extraction"
+    assert by_kind["deep_context_file_inventory"]["output"].splitlines() == [
+        ".omx/context/p11b-ralph.md",
+        "src/data/revolut-x-readonly-collector-guard.mjs",
+    ]
+    assert "phase10 noise" not in by_kind["deep_context_file_contents"]["output"]
+
+
+def test_extract_context_file_paths_preserves_dot_paths():
+    assert extract_context_file_paths("See `.omx/context/p11b.md`; ./src/data/guard.mjs.") == [
+        ".omx/context/p11b.md",
+        "src/data/guard.mjs",
+    ]
 
 
 def test_deep_context_evidence_excludes_private_local_paths(tmp_path):

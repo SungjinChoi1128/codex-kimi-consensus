@@ -281,7 +281,8 @@ class Orchestrator:
         existing = self.db.list_evidence(run.run_id)
         if any(item.kind == "git_diff_stat" for item in existing):
             return
-        session_context_anchored = any(item.kind == "user_session_context" for item in existing) and not extract_commit_refs(run.objective)
+        session_context = "\n\n".join(item.output for item in existing if item.kind == "user_session_context")
+        session_context_anchored = bool(session_context) and not extract_commit_refs(run.objective)
         if session_context_anchored:
             self.db.add_evidence(
                 run.run_id,
@@ -296,7 +297,7 @@ class Orchestrator:
                 ),
                 command="consensusd session-context anchored scope",
             )
-            self._record_deep_context_evidence(run)
+            self._record_deep_context_evidence(run, session_context=session_context)
             return
         for kind, command, empty_message in initial_git_evidence_commands(run.objective):
             status, output = run_fixed_git_command(run.project_root, command)
@@ -310,10 +311,10 @@ class Orchestrator:
             )
         self._record_deep_context_evidence(run)
 
-    def _record_deep_context_evidence(self, run: Run) -> None:
+    def _record_deep_context_evidence(self, run: Run, session_context: str | None = None) -> None:
         if not is_git_repo(run.project_root):
             return
-        for item in build_deep_context_evidence(run.project_root, run.objective):
+        for item in build_deep_context_evidence(run.project_root, run.objective, session_context=session_context):
             self.db.add_evidence(
                 run.run_id,
                 run.current_round,
@@ -772,6 +773,9 @@ DEEP_CONTEXT_CHAR_LIMIT = 120_000
 DEEP_CONTEXT_FILE_LIMIT = 24
 DEEP_CONTEXT_PER_FILE_LIMIT = 20_000
 RELEVANT_NAME_RE = re.compile(r"(p11b|revolut|readonly|read-only|collector|guard|control-template|key-governance)", re.I)
+CONTEXT_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:\.?[\w.-]+/)+[\w.@:+-]+\.(?:js|mjs|cjs|ts|json|md|toml|yaml|yml|txt))"
+)
 TEXT_SUFFIXES = {
     ".js",
     ".mjs",
@@ -786,7 +790,7 @@ TEXT_SUFFIXES = {
 }
 
 
-def build_deep_context_evidence(project_root: str, objective: str) -> list[EvidenceItem]:
+def build_deep_context_evidence(project_root: str, objective: str, session_context: str | None = None) -> list[EvidenceItem]:
     """Build a bounded repo-context packet for real agent proposal quality.
 
     This is deliberately not generic shell access: it uses fixed git argv,
@@ -797,6 +801,7 @@ def build_deep_context_evidence(project_root: str, objective: str) -> list[Evide
     root = Path(project_root)
     items: list[EvidenceItem] = []
     files: list[str] = []
+    session_files = extract_context_file_paths(session_context or "")
     commit_refs = extract_commit_refs(objective)[:2]
     if commit_refs:
         items.append(
@@ -827,14 +832,17 @@ def build_deep_context_evidence(project_root: str, objective: str) -> list[Evide
                     "output": cap_text(diff, DEEP_CONTEXT_CHAR_LIMIT),
                 }
             )
-    files.extend(discover_relevant_context_files(root))
+    if session_files:
+        files.extend(session_files)
+    else:
+        files.extend(discover_relevant_context_files(root))
     files = unique_preserve_order(file for file in files if safe_context_file(root, file))[:DEEP_CONTEXT_FILE_LIMIT]
     if files:
         items.append(
             {
                 "kind": "deep_context_file_inventory",
                 "status": "OK",
-                "command": "repo-local bounded context discovery",
+                "command": "session_context path extraction" if session_files else "repo-local bounded context discovery",
                 "output": "\n".join(files),
             }
         )
@@ -858,6 +866,18 @@ def build_deep_context_evidence(project_root: str, objective: str) -> list[Evide
             }
         )
     return items
+
+
+def extract_context_file_paths(text: str) -> list[str]:
+    paths: list[str] = []
+    for match in CONTEXT_PATH_RE.finditer(text):
+        path = match.group(1).strip().strip("`'\"()[]{}<>").rstrip(".,;:")
+        path = path.replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
+        if path:
+            paths.append(path)
+    return unique_preserve_order(paths)
 
 
 def git_commit_changed_files(project_root: str, ref: str) -> list[str]:
