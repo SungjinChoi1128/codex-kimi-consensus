@@ -154,13 +154,14 @@ uv --project /path/to/codex-kimi-consensus run consensusd review \
   --runner-mode codex-kimi-edit
 ```
 
-This creates the run, advances the local orchestrator, watches status changes, and prints a readable transcript. `--runner-mode codex-kimi-edit` uses real `codex exec` for proposals, scoped revision passes, and OMX generation, plus real local Kimi CLI for architect review. `--runner-mode codex-kimi` is read-only: Codex plans and Kimi reviews, but Codex will not edit files between rounds. `--runner-mode codex` is a partial smoke that keeps Kimi deterministic.
+This creates the run, advances the local orchestrator, watches brief-driven progress, and prints a final brief plus Kimi/Codex negotiation summary. It does not dump the full transcript unless you add `--show-transcript`. `--runner-mode codex-kimi-edit` uses real `codex exec` for proposals, scoped revision passes, and OMX generation, plus real local Kimi CLI for architect review. `--runner-mode codex-kimi` is read-only: Codex plans and Kimi reviews, but Codex will not edit files between rounds. `--runner-mode codex` is a partial smoke that keeps Kimi deterministic.
 
 ## CLI
 
 ```bash
 uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit
 uv run consensusd review "OBJECTIVE" --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit
+uv run consensusd review "OBJECTIVE" --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --show-transcript
 uv run consensusd brief RUN_ID
 uv run consensusd status RUN_ID
 uv run consensusd watch RUN_ID --interval 5

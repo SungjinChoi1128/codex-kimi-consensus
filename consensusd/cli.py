@@ -137,6 +137,38 @@ def _print_brief(data: dict[str, object]) -> None:
             print(f"- {event['event_type']} round={payload.get('round')}{elapsed}")
 
 
+def _progress_line(data: dict[str, object]) -> str:
+    event = data.get("latest_phase_event") or {}
+    event_type = event.get("event_type") if isinstance(event, dict) else None
+    payload = event.get("payload", {}) if isinstance(event, dict) else {}
+    heartbeat = payload.get("heartbeat") if isinstance(payload, dict) and str(event_type or "").endswith(".heartbeat") else None
+    suffix = f" heartbeat={heartbeat}" if heartbeat is not None else ""
+    phase = data["current_phase"]
+    return f"{data['status']}  phase={phase}  round={data['round']}/{data['max_rounds']}{suffix}"
+
+
+def _print_negotiation_summary(data: dict[str, object]) -> None:
+    proposals = data.get("proposals", [])
+    reviews = data.get("reviews", [])
+    if not isinstance(proposals, list) or not isinstance(reviews, list):
+        return
+    if not proposals and not reviews:
+        return
+    print("\nNegotiation")
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            continue
+        round_no = proposal.get("round")
+        runner = proposal.get("runner", "unknown")
+        print(f"- Round {round_no}: Codex proposal ({runner})")
+        matching = [review for review in reviews if isinstance(review, dict) and review.get("round") == round_no]
+        for review in matching:
+            status = review.get("status")
+            review_runner = review.get("runner", "unknown")
+            summary = _clip(" ".join(str(review.get("content", "")).split()), 500)
+            print(f"  Kimi {status} ({review_runner}): {summary}")
+
+
 def _clip(text: str, limit: int = 1800) -> str:
     if len(text) <= limit:
         return text
@@ -355,6 +387,7 @@ def review_command(
     interval: float = 0.25,
     json_output: bool = False,
     runner_mode: str = "mock",
+    show_transcript: bool = False,
 ) -> None:
     """Run the whole approval-gated review loop in this process."""
     settings = _settings(db, project_root, runner_mode=runner_mode)
@@ -362,13 +395,11 @@ def review_command(
     database.init()
     orchestrator = Orchestrator(database, settings)
     service = ConsensusService(database, settings, orchestrator=None)
-    last_status = None
+    last_progress = None
     with orchestrator.exclusive():
         result = service.tool_start_consensus_review(objective, str(project_root.resolve()), mode, max_rounds)
         run_id = result["run_id"]
-        if json_output:
-            _print_json(result)
-        else:
+        if not json_output:
             print(f"Started consensus review: {run_id}")
             print(f"Project: {project_root.resolve()}")
             print(f"Runner: {result.get('runner_mode', 'unknown')}")
@@ -378,9 +409,12 @@ def review_command(
         while True:
             orchestrator._tick_unlocked()
             run = service.db.get_run(run_id)
-            if run.status != last_status and not json_output:
-                print(f"{run.status.value}  round={run.current_round}  version={run.version}")
-                last_status = run.status
+            if not json_output:
+                brief = service.tool_get_consensus_brief(run_id)
+                progress = _progress_line(brief)
+                if progress != last_progress:
+                    print(progress)
+                    last_progress = progress
             if run.status in {
                 RunStatus.AWAITING_HUMAN_APPROVAL,
                 RunStatus.RALPH_HANDOFF_COMPLETE,
@@ -390,8 +424,22 @@ def review_command(
                 break
             time.sleep(interval)
 
+    brief = service.tool_get_consensus_brief(run_id)
     transcript = service.tool_get_consensus_transcript(run_id)
-    _print_json(transcript) if json_output else _print_transcript(transcript)
+    if json_output:
+        payload = {"run_id": run_id, "brief": brief}
+        if show_transcript:
+            payload["transcript"] = transcript
+        _print_json(payload)
+        return
+    print()
+    _print_brief(brief)
+    _print_negotiation_summary(transcript)
+    if show_transcript:
+        print()
+        _print_transcript(transcript)
+    else:
+        print("\nFull transcript: consensusd transcript " f"{run_id} --db {settings.db_path}")
 
 
 def transcript_command(run_id: str, db: Path = DEFAULT_DB, json_output: bool = False) -> None:
@@ -464,9 +512,10 @@ if typer is not None:
         interval: float = typer.Option(0.25, "--interval"),
         json_output: bool = typer.Option(False, "--json", help="Print raw JSON."),
         runner_mode: str = typer.Option("mock", "--runner-mode", help="mock, codex, codex-kimi, or codex-kimi-edit"),
+        show_transcript: bool = typer.Option(False, "--show-transcript", help="Print the full transcript after the brief."),
     ) -> None:
         """Start, watch, and print an approval-gated review in one Codex-friendly command."""
-        review_command(objective, project_root, db, mode, max_rounds, interval, json_output, runner_mode)
+        review_command(objective, project_root, db, mode, max_rounds, interval, json_output, runner_mode, show_transcript)
 
     @app.command("status")
     def typer_status(
@@ -551,6 +600,7 @@ else:
         review_p.add_argument("--interval", type=float, default=0.25)
         review_p.add_argument("--json", action="store_true")
         review_p.add_argument("--runner-mode", default="mock")
+        review_p.add_argument("--show-transcript", action="store_true")
 
         for name in ("status", "brief", "transcript", "approve", "cancel"):
             p = sub.add_parser(name)
@@ -583,6 +633,7 @@ else:
                 args.interval,
                 args.json,
                 args.runner_mode,
+                args.show_transcript,
             )
         elif args.command == "status":
             status_command(args.run_id, args.db, args.json)

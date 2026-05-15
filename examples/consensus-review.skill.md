@@ -6,10 +6,10 @@ Workflow:
 1. Prefer the MCP tool `start_consensus_review` when the `consensus` MCP server is already available.
 2. If the MCP server is not available, run the one-shot local command from the current repo instead of asking the user to open another terminal:
    `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run consensusd review "<objective>" --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit`
-3. Return the `run_id`, current status, and the approval gate state.
+3. Return the `run_id`, current status, approval gate state, final brief, and concise Kimi/Codex negotiation summary. Do not paste the full transcript unless the user asks.
 4. Use `get_consensus_brief` first when the user asks what is happening; it is the Codex-friendly progress surface.
 5. Use `get_consensus_status` for raw state and `get_consensus_transcript` when the user asks for the full transcript.
-6. If using CLI fallback, use `consensusd brief`, `consensusd status`, `consensusd transcript`, and `consensusd approve` through `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run ...`.
+6. If using CLI fallback, use `consensusd review` for the one-command path, `consensusd brief` for progress, `consensusd status` for raw state, `consensusd transcript` only when asked, and `consensusd approve` for handoff approval through `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run ...`.
 7. Do not claim the workflow is complete until status is `OMX_GENERATED`, `AWAITING_HUMAN_APPROVAL`, or `RALPH_HANDOFF_COMPLETE`.
 8. Pause for explicit user approval before Ralph handoff by calling `approve_ralph_handoff` or running `consensusd approve`.
 
