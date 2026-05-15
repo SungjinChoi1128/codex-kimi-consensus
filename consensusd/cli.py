@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 from urllib.error import URLError
@@ -38,8 +39,9 @@ def _settings(
     port: int = 8787,
     dev_auth_role: Optional[str] = None,
     runner_mode: Optional[str] = None,
+    subprocess_timeout_sec: Optional[int] = None,
 ) -> Settings:
-    return Settings.from_env(
+    settings = Settings.from_env(
         db_path=db,
         project_root=project_root,
         host=host,
@@ -47,6 +49,9 @@ def _settings(
         dev_auth_role=dev_auth_role,
         runner_mode=runner_mode,
     )
+    if subprocess_timeout_sec is not None:
+        settings = replace(settings, subprocess_timeout_sec=subprocess_timeout_sec)
+    return settings
 
 
 def _service(db_path: Optional[Path], project_root: Optional[Path]) -> tuple[ConsensusService, Orchestrator]:
@@ -240,13 +245,23 @@ def start_command(
     port: int = 8787,
     dev_auth_role: Optional[str] = None,
     runner_mode: Optional[str] = None,
+    subprocess_timeout_sec: Optional[int] = None,
 ) -> None:
     require_localhost(host)
-    settings = _settings(db, project_root, host, port, dev_auth_role=dev_auth_role, runner_mode=runner_mode)
+    settings = _settings(
+        db,
+        project_root,
+        host,
+        port,
+        dev_auth_role=dev_auth_role,
+        runner_mode=runner_mode,
+        subprocess_timeout_sec=subprocess_timeout_sec,
+    )
     Database(settings.db_path).init()
     print(
         f"Starting consensusd on http://{settings.host}:{settings.port} "
-        f"with db {settings.db_path} runner={settings.runner_mode}"
+        f"with db {settings.db_path} runner={settings.runner_mode} "
+        f"subprocess_timeout={settings.subprocess_timeout_sec}s"
     )
     if settings.dev_auth_role:
         print(f"WARNING: dev no-token MCP role enabled: {settings.dev_auth_role}")
@@ -260,6 +275,7 @@ def _spawn_endpoint(
     port: int,
     dev_auth_role: str,
     runner_mode: str,
+    subprocess_timeout_sec: Optional[int],
 ) -> dict[str, object]:
     require_localhost(host)
     db = Path(db)
@@ -289,6 +305,8 @@ def _spawn_endpoint(
         "--runner-mode",
         runner_mode,
     ]
+    if subprocess_timeout_sec is not None:
+        command.extend(["--subprocess-timeout-sec", str(subprocess_timeout_sec)])
     with log_file.open("ab") as log:
         process = subprocess.Popen(
             command,
@@ -317,12 +335,15 @@ def up_command(
     kimi_port: int = 8788,
     with_kimi: bool = True,
     runner_mode: str = "mock",
+    subprocess_timeout_sec: Optional[int] = None,
 ) -> None:
     """Start localhost MCP endpoints in the background."""
     Database(db).init()
-    results = [_spawn_endpoint(project_root.resolve(), db, host, port, "control_surface", runner_mode)]
+    results = [_spawn_endpoint(project_root.resolve(), db, host, port, "control_surface", runner_mode, subprocess_timeout_sec)]
     if with_kimi:
-        results.append(_spawn_endpoint(project_root.resolve(), db, host, kimi_port, "kimi_reviewer", runner_mode))
+        results.append(
+            _spawn_endpoint(project_root.resolve(), db, host, kimi_port, "kimi_reviewer", runner_mode, subprocess_timeout_sec)
+        )
     print("consensusd is available in the background")
     for result in results:
         print(
@@ -390,9 +411,10 @@ def review_command(
     json_output: bool = False,
     runner_mode: str = "mock",
     show_transcript: bool = False,
+    subprocess_timeout_sec: Optional[int] = None,
 ) -> None:
     """Run the whole approval-gated review loop in this process."""
-    settings = _settings(db, project_root, runner_mode=runner_mode)
+    settings = _settings(db, project_root, runner_mode=runner_mode, subprocess_timeout_sec=subprocess_timeout_sec)
     database = Database(settings.db_path)
     database.init()
     orchestrator = Orchestrator(database, settings)
@@ -491,9 +513,14 @@ if typer is not None:
         port: int = typer.Option(8787, "--port"),
         dev_auth_role: Optional[str] = typer.Option(None, "--dev-auth-role"),
         runner_mode: str = typer.Option("mock", "--runner-mode", help="mock, codex, codex-kimi, or codex-kimi-edit"),
+        subprocess_timeout_sec: Optional[int] = typer.Option(
+            None,
+            "--subprocess-timeout-sec",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+        ),
     ) -> None:
         """Start the localhost daemon."""
-        start_command(project_root, db, host, port, dev_auth_role, runner_mode)
+        start_command(project_root, db, host, port, dev_auth_role, runner_mode, subprocess_timeout_sec)
 
     @app.command("up")
     def typer_up(
@@ -504,9 +531,14 @@ if typer is not None:
         kimi_port: int = typer.Option(8788, "--kimi-port"),
         with_kimi: bool = typer.Option(True, "--with-kimi/--no-kimi"),
         runner_mode: str = typer.Option("mock", "--runner-mode", help="mock, codex, codex-kimi, or codex-kimi-edit"),
+        subprocess_timeout_sec: Optional[int] = typer.Option(
+            None,
+            "--subprocess-timeout-sec",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+        ),
     ) -> None:
         """Start background localhost MCP endpoints; no extra terminal needed."""
-        up_command(project_root, db, host, port, kimi_port, with_kimi, runner_mode)
+        up_command(project_root, db, host, port, kimi_port, with_kimi, runner_mode, subprocess_timeout_sec)
 
     @app.command("down")
     def typer_down(
@@ -527,9 +559,25 @@ if typer is not None:
         json_output: bool = typer.Option(False, "--json", help="Print raw JSON."),
         runner_mode: str = typer.Option("mock", "--runner-mode", help="mock, codex, codex-kimi, or codex-kimi-edit"),
         show_transcript: bool = typer.Option(False, "--show-transcript", help="Print the full transcript after the brief."),
+        subprocess_timeout_sec: Optional[int] = typer.Option(
+            None,
+            "--subprocess-timeout-sec",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+        ),
     ) -> None:
         """Start, watch, and print an approval-gated review in one Codex-friendly command."""
-        review_command(objective, project_root, db, mode, max_rounds, interval, json_output, runner_mode, show_transcript)
+        review_command(
+            objective,
+            project_root,
+            db,
+            mode,
+            max_rounds,
+            interval,
+            json_output,
+            runner_mode,
+            show_transcript,
+            subprocess_timeout_sec,
+        )
 
     @app.command("status")
     def typer_status(
@@ -591,6 +639,7 @@ else:
         start_p.add_argument("--port", type=int, default=8787)
         start_p.add_argument("--dev-auth-role", default=None)
         start_p.add_argument("--runner-mode", default="mock")
+        start_p.add_argument("--subprocess-timeout-sec", type=int, default=None)
 
         up_p = sub.add_parser("up")
         up_p.add_argument("--project-root", type=Path, default=Path("."))
@@ -600,6 +649,7 @@ else:
         up_p.add_argument("--kimi-port", type=int, default=8788)
         up_p.add_argument("--no-kimi", action="store_true")
         up_p.add_argument("--runner-mode", default="mock")
+        up_p.add_argument("--subprocess-timeout-sec", type=int, default=None)
 
         down_p = sub.add_parser("down")
         down_p.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -615,6 +665,7 @@ else:
         review_p.add_argument("--json", action="store_true")
         review_p.add_argument("--runner-mode", default="mock")
         review_p.add_argument("--show-transcript", action="store_true")
+        review_p.add_argument("--subprocess-timeout-sec", type=int, default=None)
 
         for name in ("status", "brief", "transcript", "approve", "cancel"):
             p = sub.add_parser(name)
@@ -632,9 +683,26 @@ else:
         if args.command == "init":
             init_command(args.db)
         elif args.command == "start":
-            start_command(args.project_root, args.db, args.host, args.port, args.dev_auth_role, args.runner_mode)
+            start_command(
+                args.project_root,
+                args.db,
+                args.host,
+                args.port,
+                args.dev_auth_role,
+                args.runner_mode,
+                args.subprocess_timeout_sec,
+            )
         elif args.command == "up":
-            up_command(args.project_root, args.db, args.host, args.port, args.kimi_port, not args.no_kimi, args.runner_mode)
+            up_command(
+                args.project_root,
+                args.db,
+                args.host,
+                args.port,
+                args.kimi_port,
+                not args.no_kimi,
+                args.runner_mode,
+                args.subprocess_timeout_sec,
+            )
         elif args.command == "down":
             down_command(args.db, args.port)
         elif args.command == "review":
@@ -648,6 +716,7 @@ else:
                 args.json,
                 args.runner_mode,
                 args.show_transcript,
+                args.subprocess_timeout_sec,
             )
         elif args.command == "status":
             status_command(args.run_id, args.db, args.json)

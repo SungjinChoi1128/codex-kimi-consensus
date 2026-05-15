@@ -22,10 +22,12 @@ Workflow:
 
 For background MCP setup without visible server terminals, use:
 
-`uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit`
+`uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600`
 
 Do not pass an `agent` or `role` argument to tools. The daemon derives caller identity from MCP auth context.
 
 Runner warning: `runner=codex-kimi-edit` runs real Codex proposal/revision/OMX plus real Kimi architect review. Codex may edit files between Kimi review rounds to resolve blockers, but Ralph handoff still pauses for human approval. `runner=codex-kimi` is read-only and may fail if Kimi requires actual repo changes. `runner=codex` is only a partial smoke with deterministic mock Kimi review. `runner=mock` is only a workflow/plumbing rehearsal.
+
+Timeout warning: real Codex/Kimi phases default to 30 minutes. If a run times out during `CODEX_DRAFTING`, restart the daemon with `--subprocess-timeout-sec 3600` and keep the objective focused. The proposal pass should be bounded and should name missing evidence rather than running broad scans indefinitely.
 
 Editable guardrails: `codex-kimi-edit` requires a git worktree, records changed files after every revision, and fails the run if Codex touches denied paths. Defaults deny `.git/`, `.consensusd/`, `.env`, `.env.`-prefixed files such as `.env.local`, `.ssh/`, and `secrets/`. Optional environment variables: `CONSENSUSD_EDITABLE_ALLOWED_PATHS` and `CONSENSUSD_EDITABLE_DENIED_PATHS`, comma-separated repo-relative paths.

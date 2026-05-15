@@ -27,6 +27,9 @@ class SubprocessCodexRunner:
             "This is a read-only planning/review pass. Do not edit files. Do not ask questions.\n"
             "Codex is the owner and editor of the implementation plan. Kimi is an advisory reviewer whose output "
             "enriches context and must be adjudicated, not blindly copied as the plan.\n"
+            "Time budget: return the proposal quickly. Use the evidence already supplied below as the primary context; "
+            "do not run tests, broad static scans, exhaustive grep loops, or long repository audits in this proposal pass. "
+            "If more evidence would be useful, name it as missing evidence instead of continuing to inspect indefinitely.\n"
             "Produce a concrete markdown proposal for the current repository/diff at the level of an OMX adjudication artifact.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"
@@ -98,6 +101,7 @@ class SubprocessCodexRunner:
         prompt = (
             "You are Codex generating the final OMX implementation plan after consensus lock.\n"
             "This is a read-only planning pass. Do not edit files. Do not run destructive commands.\n"
+            "Time budget: generate the plan from the consensus transcript and captured evidence; do not run broad scans or tests here.\n"
             "Generate a detailed, production-minded OMX plan that Ralph can execute only after human approval.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"

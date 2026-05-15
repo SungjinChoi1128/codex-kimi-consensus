@@ -181,6 +181,15 @@ Long runner calls also emit periodic `*.heartbeat` events. Configure the interva
 export CONSENSUSD_HEARTBEAT_INTERVAL_SEC=30
 ```
 
+Real Codex/Kimi phases default to a 30 minute subprocess timeout. For unusually deep reviews, raise it with either an environment variable or the CLI flag:
+
+```bash
+export CONSENSUSD_SUBPROCESS_TIMEOUT_SEC=3600
+uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600
+```
+
+Codex proposal and OMX prompts are intentionally bounded: they should use captured evidence first and record missing evidence instead of running broad scans until timeout.
+
 ## Editable Mode Guardrails
 
 `--runner-mode codex-kimi-edit` allows Codex to make scoped repo edits after Kimi requests revision. Each revision records:
