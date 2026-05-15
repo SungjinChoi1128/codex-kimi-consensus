@@ -63,7 +63,7 @@ class ConsensusService:
         mode: str = "approval-gated",
         max_rounds: int = 5,
         lease_mode: str = "detached",
-        lease_ttl_seconds: int = 90,
+        lease_ttl_seconds: int = 300,
         session_context: Optional[str] = None,
     ) -> dict[str, Any]:
         if max_rounds < 1:
@@ -314,7 +314,7 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
         mode: str = "approval-gated",
         max_rounds: int = 5,
         lease_mode: str = "detached",
-        lease_ttl_seconds: int = 90,
+        lease_ttl_seconds: int = 300,
         session_context: Optional[str] = None,
     ) -> dict[str, Any]:
         return call(

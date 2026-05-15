@@ -138,12 +138,12 @@ start_consensus_review(
   project_root,
   mode="approval-gated",
   lease_mode="attached",
-  lease_ttl_seconds=90,
+  lease_ttl_seconds=300,
   session_context="<recent Ralph/Codex summary when the user is referring to prior chat state>"
 )
 ```
 
-The tool returns a `run_id`, lease metadata, whether session context was recorded, and a watch command. Attached leases are the Codex CLI UX guardrail: while Codex is actively waiting, `watch_consensus_progress(..., refresh_lease=true)` keeps the run alive. If the Codex chat/tool wait is interrupted and no heartbeat refresh arrives, consensusd cancels the run and terminates active Codex/Kimi subprocesses.
+The tool returns a `run_id`, lease metadata, whether session context was recorded, and a watch command. Attached leases are the Codex CLI UX guardrail: use a longer initial lease, such as 300 seconds, so Codex has time to start watching after setup/context gathering. While Codex is actively waiting, `watch_consensus_progress(..., refresh_lease=true)` keeps the run alive. If the Codex chat/tool wait is interrupted and no heartbeat refresh arrives, consensusd cancels the run and terminates active Codex/Kimi subprocesses.
 
 Use `session_context` when the user says something like "review the P11B implementation" after a Ralph completion report or Codex summary. Keep it short and factual: recent artifact paths, commit ids, claimed safety outcomes, and the user's current ask. If `session_context` is present and the objective does not name a commit, consensusd treats the session context as the review anchor and intentionally omits git status, diff, and HEAD commit evidence from the agent prompt. It still supplies bounded relevant file contents when available so Codex/Kimi can check the summary against actual files.
 
