@@ -285,7 +285,18 @@ def test_consensus_brief_summarizes_run_for_codex(tmp_path):
     settings, app = make_app(tmp_path)
     service = app.state.service
     run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
-    service.db.add_event(run.run_id, "codex.proposal.started", {"round": 1})
+    service.db.add_event(
+        run.run_id,
+        "codex.proposal.started",
+        {
+            "round": 1,
+            "live_log_path": "/tmp/codex.live.log",
+            "live_log_bytes": 123,
+            "last_message_path": "/tmp/codex.last-message.md",
+            "last_message_exists": False,
+            "last_message_bytes": 0,
+        },
+    )
     service.db.add_proposal(run.run_id, 1, "Codex proposal content")
     service.db.add_review(run.run_id, 1, ReviewStatus.NEEDS_REVISION, "Kimi wants stronger evidence")
     service.db.add_omx_plan(run.run_id, "plan", path="/tmp/plan.md")
@@ -297,6 +308,9 @@ def test_consensus_brief_summarizes_run_for_codex(tmp_path):
     assert brief["error"] is None
     assert brief["current_phase"] == "codex.proposal"
     assert brief["latest_phase_event"]["event_type"] == "codex.proposal.started"
+    assert brief["live_log_path"] == "/tmp/codex.live.log"
+    assert brief["live_log_bytes"] == 123
+    assert brief["last_message_exists"] is False
     assert brief["last_kimi_status"] == "NEEDS_REVISION"
     assert "Kimi wants" in brief["last_kimi_summary"]
     assert brief["omx_plan_path"] == "/tmp/plan.md"
@@ -311,7 +325,13 @@ def test_watch_consensus_progress_returns_codex_friendly_samples(tmp_path):
     service.db.add_event(
         run.run_id,
         "codex.proposal.heartbeat",
-        {"round": 1, "elapsed_seconds": 31.2, "heartbeat": 1},
+        {
+            "round": 1,
+            "elapsed_seconds": 31.2,
+            "heartbeat": 1,
+            "live_log_path": "/tmp/live.log",
+            "live_log_bytes": 55,
+        },
     )
 
     progress = service.tool_watch_consensus_progress(run.run_id, wait_seconds=1, interval_seconds=1)
@@ -321,6 +341,8 @@ def test_watch_consensus_progress_returns_codex_friendly_samples(tmp_path):
     assert progress["samples"]
     assert progress["latest"]["phase"] == "codex.proposal"
     assert progress["latest"]["heartbeat"] == 1
+    assert progress["latest"]["live_log_path"] == "/tmp/live.log"
+    assert progress["latest"]["live_log_bytes"] == 55
     assert progress["latest"]["next_action"]
 
 

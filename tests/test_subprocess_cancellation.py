@@ -129,6 +129,61 @@ def test_cancellable_subprocess_terminates_detached_child(tmp_path):
     assert wait_for_pid_exit(int(child_pid.read_text()), timeout=5)
 
 
+def test_cancellable_subprocess_writes_live_log(tmp_path):
+    live_log = tmp_path / "agent.live.log"
+    script = tmp_path / "chatty_agent.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "print('hello from stdout', flush=True)",
+                "print('hello from stderr', file=sys.stderr, flush=True)",
+            ]
+        )
+    )
+
+    result = run_cancellable_command(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        timeout_sec=10,
+        label="chatty agent",
+        poll_interval=0.05,
+        live_log_path=live_log,
+    )
+
+    assert result.returncode == 0
+    assert result.live_log_path == str(live_log)
+    assert "hello from stdout" in result.stdout
+    assert "hello from stderr" in result.stderr
+    log = live_log.read_text()
+    assert "[stdout] hello from stdout" in log
+    assert "[stderr] hello from stderr" in log
+
+
+def test_zero_timeout_allows_subprocess_to_finish(tmp_path):
+    script = tmp_path / "slow_but_ok.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import time",
+                "time.sleep(0.2)",
+                "print('finished', flush=True)",
+            ]
+        )
+    )
+
+    result = run_cancellable_command(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        timeout_sec=0,
+        label="unlimited agent",
+        poll_interval=0.05,
+    )
+
+    assert result.returncode == 0
+    assert "finished" in result.stdout
+
+
 def test_orchestrator_cancellation_kills_active_codex_subprocess(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()

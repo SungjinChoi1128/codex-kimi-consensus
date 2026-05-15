@@ -117,6 +117,13 @@ def _print_brief(data: dict[str, object]) -> None:
     print(f"Runner: {data['runner_mode']}")
     if data.get("error"):
         print(f"Error: {data['error']}")
+    if data.get("live_log_path"):
+        live_size = data.get("live_log_bytes", 0)
+        print(f"Live log: {data['live_log_path']} ({live_size} bytes)")
+    if data.get("last_message_path"):
+        last_size = data.get("last_message_bytes", 0)
+        exists = "ready" if data.get("last_message_exists") else "pending"
+        print(f"Last message: {data['last_message_path']} ({exists}, {last_size} bytes)")
     print(f"Next: {data['next_action']}")
     if data.get("last_kimi_status"):
         print(f"\nKimi: {data['last_kimi_status']}")
@@ -261,7 +268,7 @@ def start_command(
     print(
         f"Starting consensusd on http://{settings.host}:{settings.port} "
         f"with db {settings.db_path} runner={settings.runner_mode} "
-        f"subprocess_timeout={settings.subprocess_timeout_sec}s"
+        f"subprocess_timeout={_timeout_label(settings.subprocess_timeout_sec)}"
     )
     if settings.dev_auth_role:
         print(f"WARNING: dev no-token MCP role enabled: {settings.dev_auth_role}")
@@ -325,6 +332,10 @@ def _spawn_endpoint(
             return {"port": port, "role": dev_auth_role, "pid": process.pid, "status": "failed", "log": str(log_file)}
         time.sleep(0.1)
     return {"port": port, "role": dev_auth_role, "pid": process.pid, "status": "starting", "log": str(log_file)}
+
+
+def _timeout_label(timeout_sec: int) -> str:
+    return "unlimited" if timeout_sec <= 0 else f"{timeout_sec}s"
 
 
 def up_command(
@@ -531,7 +542,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
+            help="Timeout for real Codex/Kimi subprocess phases. Use 0 for unlimited. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
         session_context: Optional[str] = typer.Option(
             None,
@@ -554,7 +565,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
+            help="Timeout for real Codex/Kimi subprocess phases. Use 0 for unlimited. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
     ) -> None:
         """Start background localhost MCP endpoints; no extra terminal needed."""
@@ -582,7 +593,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
+            help="Timeout for real Codex/Kimi subprocess phases. Use 0 for unlimited. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
     ) -> None:
         """Start, watch, and print an approval-gated review in one Codex-friendly command."""

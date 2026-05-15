@@ -18,6 +18,7 @@ from .runners.base import AgentRunner, RevisionRunner, RunnerCancelled, reset_ca
 from .runners.mock import MockCodexRunner, MockKimiRunner
 from .runners.subprocess_codex import SubprocessCodexRunner
 from .runners.subprocess_kimi import SubprocessKimiRunner
+from .runners.subprocess_utils import phase_artifact_paths
 from .settings import Settings
 from .state_machine import is_terminal
 
@@ -457,9 +458,24 @@ class Orchestrator:
         self.db.transition_run(run_id, RunStatus.CANCELLED, expected_version=latest.version, error=error)
 
     def _heartbeat_progress_payload(self, run: Run, event_prefix: str) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if event_prefix.startswith(("codex.", "kimi.")):
+            paths = phase_artifact_paths(run.project_root, run.run_id, event_prefix, run.current_round)
+            live_log = paths["live_log"]
+            last_message = paths["last_message"]
+            payload.update(
+                {
+                    "live_log_path": str(live_log),
+                    "live_log_bytes": file_size(live_log),
+                    "last_message_path": str(last_message),
+                    "last_message_exists": last_message.exists(),
+                    "last_message_bytes": file_size(last_message),
+                }
+            )
         if event_prefix != "codex.revision":
-            return {}
-        return {"changed_files": git_changed_files(run.project_root)}
+            return payload
+        payload["changed_files"] = git_changed_files(run.project_root)
+        return payload
 
     def _ensure_context_bridge(self, run: Run) -> None:
         transcript = self.db.transcript(run.run_id)
@@ -986,6 +1002,13 @@ def cap_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + f"\n\n... truncated at {limit} characters by consensusd context cap ..."
+
+
+def file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def package_scripts_context(package_json: Path, objective: str = "") -> str:

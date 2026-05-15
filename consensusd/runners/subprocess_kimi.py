@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run
-from consensusd.runners.subprocess_utils import run_cancellable_command
+from consensusd.runners.subprocess_utils import phase_artifact_paths, run_cancellable_command
 from consensusd.settings import Settings
 
 
@@ -62,9 +62,11 @@ class SubprocessKimiRunner:
             "-p",
             prompt,
         ]
+        paths = phase_artifact_paths(run.project_root, run.run_id, "kimi.review", run.current_round)
+        live_log_path = paths["live_log"]
         print(
             f"[consensusd] run={run.run_id} phase=kimi.review starting "
-            f"timeout={self.settings.subprocess_timeout_sec}s",
+            f"timeout={_timeout_label(self.settings.subprocess_timeout_sec)} live_log={live_log_path}",
             flush=True,
         )
         result = run_cancellable_command(
@@ -72,10 +74,11 @@ class SubprocessKimiRunner:
             cwd=run.project_root,
             timeout_sec=self.settings.subprocess_timeout_sec,
             label="kimi subprocess during review",
+            live_log_path=live_log_path,
         )
         print(
             f"[consensusd] run={run.run_id} phase=kimi.review completed "
-            f"pid={result.pid} returncode={result.returncode}",
+            f"pid={result.pid} returncode={result.returncode} live_log={result.live_log_path}",
             flush=True,
         )
         content = (result.stdout or "").strip()
@@ -103,6 +106,10 @@ def _format_evidence(evidence: list[Evidence]) -> str:
             f"```text\n{item.output.strip() or '(empty)'}\n```"
         )
     return "\n\n".join(blocks)
+
+
+def _timeout_label(timeout_sec: int) -> str:
+    return "unlimited" if timeout_sec <= 0 else f"{timeout_sec}s"
 
 
 def _review_context_instruction(evidence: list[Evidence]) -> str:

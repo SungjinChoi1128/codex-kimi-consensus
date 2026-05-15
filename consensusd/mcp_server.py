@@ -485,6 +485,8 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
         for event in transcript.events
         if event.event_type.startswith(("codex.", "kimi."))
     ]
+    latest_phase_payload = phase_events[-1]["payload"] if phase_events else {}
+    latest_phase_payload = latest_phase_payload if isinstance(latest_phase_payload, dict) else {}
     return {
         "run_id": run.run_id,
         "status": run.status.value,
@@ -498,6 +500,11 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
         "project_root": run.project_root,
         "current_phase": current_phase(run.status.value, phase_events),
         "latest_phase_event": phase_events[-1] if phase_events else None,
+        "live_log_path": latest_phase_payload.get("live_log_path"),
+        "live_log_bytes": latest_phase_payload.get("live_log_bytes"),
+        "last_message_path": latest_phase_payload.get("last_message_path"),
+        "last_message_exists": latest_phase_payload.get("last_message_exists"),
+        "last_message_bytes": latest_phase_payload.get("last_message_bytes"),
         "last_kimi_status": latest_review.status.value if latest_review else None,
         "last_kimi_summary": summarize_text(latest_review.content, 600) if latest_review else None,
         "last_codex_summary": summarize_text(latest_proposal.content, 600) if latest_proposal else None,
@@ -538,6 +545,11 @@ def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
         "heartbeat": heartbeat,
         "elapsed_seconds": elapsed,
         "latest_event": event.get("event_type") if isinstance(event, dict) else None,
+        "live_log_path": payload.get("live_log_path") if isinstance(payload, dict) else None,
+        "live_log_bytes": payload.get("live_log_bytes") if isinstance(payload, dict) else None,
+        "last_message_path": payload.get("last_message_path") if isinstance(payload, dict) else None,
+        "last_message_exists": payload.get("last_message_exists") if isinstance(payload, dict) else None,
+        "last_message_bytes": payload.get("last_message_bytes") if isinstance(payload, dict) else None,
         "changed_files": payload.get("changed_files", []) if isinstance(payload, dict) else [],
         "next_action": brief["next_action"],
         "last_kimi_status": brief.get("last_kimi_status"),
