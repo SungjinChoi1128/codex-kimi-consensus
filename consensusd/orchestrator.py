@@ -906,6 +906,29 @@ RELEVANT_NAME_RE = re.compile(r"(p11b|revolut|readonly|read-only|collector|guard
 CONTEXT_PATH_RE = re.compile(
     r"(?<![\w/.-])((?:\.?[\w.-]+/)+[\w.@:+-]+\.(?:json|toml|yaml|yml|mjs|cjs|js|ts|md|txt))(?!\w)"
 )
+P11B_CONTEXT_RE = re.compile(r"(p11b|revolut\s*x|revolut-x|readonly|read-only)", re.I)
+P11B_ARTIFACT_GLOBS = (
+    "src/data/revolut-x-readonly-collector-guard.mjs",
+    "scripts/revolut_x_p11b_readonly_collector_skeleton.mjs",
+    "tests/revolut-x-readonly-collector-guard.test.mjs",
+    ".omx/plans/*p11b*.md",
+    ".omx/plans/*revolut*.md",
+    ".omx/security/*p11b*",
+    ".omx/security/*revolut*",
+    ".omx/security/*readonly*",
+    ".omx/control/*p11b*",
+    ".omx/control/*revolut*",
+    ".omx/control/*readonly*",
+    ".omx/context/*p11b*.md",
+    ".omx/research/**/*p11b*",
+    ".omx/research/**/*revolut*",
+    ".omx/validation/**/*p11b*",
+    ".omx/validation/**/*revolut*",
+    ".omx/validation/*p11b*/*",
+    ".omx/validation/*revolut*/*",
+    "omx_wiki/*p11b*.md",
+    "omx_wiki/*revolut*.md",
+)
 TEXT_SUFFIXES = {
     ".js",
     ".mjs",
@@ -932,6 +955,7 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
     items: list[EvidenceItem] = []
     files: list[str] = []
     session_files = extract_context_file_paths(session_context or "")
+    p11b_files = discover_p11b_artifact_files(root) if wants_p11b_context(objective, session_context) else []
     commit_refs = extract_commit_refs(objective)[:2]
     if commit_refs:
         items.append(
@@ -964,6 +988,9 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
             )
     if session_files:
         files.extend(session_files)
+        files.extend(p11b_files)
+    elif p11b_files:
+        files.extend(p11b_files)
     else:
         files.extend(discover_relevant_context_files(root))
     files = unique_preserve_order(file for file in files if safe_context_file(root, file))[:DEEP_CONTEXT_FILE_LIMIT]
@@ -972,7 +999,7 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
             {
                 "kind": "deep_context_file_inventory",
                 "status": "OK",
-                "command": "session_context path extraction" if session_files else "repo-local bounded context discovery",
+                "command": context_inventory_command(session_files=bool(session_files), p11b_files=bool(p11b_files)),
                 "output": "\n".join(files),
             }
         )
@@ -996,6 +1023,29 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
             }
         )
     return items
+
+
+def wants_p11b_context(objective: str, session_context: str | None = None) -> bool:
+    return bool(P11B_CONTEXT_RE.search(f"{objective}\n{session_context or ''}"))
+
+
+def context_inventory_command(session_files: bool, p11b_files: bool) -> str:
+    if session_files and p11b_files:
+        return "session_context path extraction plus P11B artifact bundle"
+    if p11b_files:
+        return "P11B artifact bundle"
+    if session_files:
+        return "session_context path extraction"
+    return "repo-local bounded context discovery"
+
+
+def discover_p11b_artifact_files(root: Path) -> list[str]:
+    paths: list[str] = []
+    for pattern in P11B_ARTIFACT_GLOBS:
+        for path in root.glob(pattern):
+            if path.is_file():
+                paths.append(path.relative_to(root).as_posix())
+    return sorted(unique_preserve_order(paths), key=context_file_rank)
 
 
 def extract_context_file_paths(text: str) -> list[str]:
@@ -1054,12 +1104,32 @@ def discover_relevant_context_files(root: Path) -> list[str]:
 
 def context_file_rank(path: str) -> tuple[int, int, str]:
     priority = 0
+    lower = path.lower()
     if path.startswith(("src/", "scripts/", "tests/")):
+        priority -= 40
+    if path.startswith((".omx/security/", ".omx/control/")):
+        priority -= 35
+    if path.startswith(".omx/plans/") and any(
+        lower.startswith(prefix)
+        for prefix in (
+            ".omx/plans/prd-p11b",
+            ".omx/plans/test-spec-p11b",
+            ".omx/plans/final-p11b",
+        )
+    ):
+        priority -= 30
+    elif path.startswith((".omx/plans/", "omx_wiki/")):
         priority -= 20
-    if path.startswith((".omx/plans/", ".omx/security/", ".omx/research/", "omx_wiki/")):
+    if path.startswith(".omx/research/"):
+        priority -= 15
+    if path.startswith(".omx/validation/"):
         priority -= 10
-    if "p11b" in path.lower():
+    if "p11b" in lower:
         priority -= 10
+    if "revolut" in lower or "readonly" in lower or "read-only" in lower:
+        priority -= 5
+    if any(marker in lower for marker in ("consensus-omx-", "context-bridge-", "kimi-codex-context-bridge")):
+        priority += 25
     return priority, len(path), path
 
 

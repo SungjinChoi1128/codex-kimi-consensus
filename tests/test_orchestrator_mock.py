@@ -466,12 +466,44 @@ def test_session_context_file_paths_drive_context_inventory(tmp_path):
     )
     by_kind = {item["kind"]: item for item in evidence}
 
-    assert by_kind["deep_context_file_inventory"]["command"] == "session_context path extraction"
+    assert by_kind["deep_context_file_inventory"]["command"] == "session_context path extraction plus P11B artifact bundle"
     assert by_kind["deep_context_file_inventory"]["output"].splitlines() == [
         ".omx/context/p11b-ralph.md",
         "src/data/revolut-x-readonly-collector-guard.mjs",
     ]
     assert "phase10 noise" not in by_kind["deep_context_file_contents"]["output"]
+
+
+def test_session_context_adds_p11b_artifact_bundle_without_git_scope(tmp_path):
+    init_git_repo(tmp_path)
+    (tmp_path / ".omx" / "plans").mkdir(parents=True)
+    (tmp_path / ".omx" / "security").mkdir(parents=True)
+    (tmp_path / ".omx" / "control").mkdir(parents=True)
+    (tmp_path / ".omx" / "validation" / "p11b-final").mkdir(parents=True)
+    (tmp_path / ".omx" / "plans" / "final-p11b-authenticated-read-only-data-contract.md").write_text("final plan\n")
+    (tmp_path / ".omx" / "security" / "revolut-x-p11b-key-governance.md").write_text("key governance\n")
+    (tmp_path / ".omx" / "control" / "revolut-x-p11b-readonly-control-template.json").write_text("{}\n")
+    (tmp_path / ".omx" / "validation" / "p11b-final" / "completion-audit.json").write_text('{"passed":true}\n')
+    (tmp_path / "src" / "data").mkdir(parents=True)
+    (tmp_path / "src" / "data" / "revolut-x-readonly-collector-guard.mjs").write_text("guard\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "revolut-x-readonly-collector-guard.test.mjs").write_text("tests\n")
+
+    evidence = build_deep_context_evidence(
+        str(tmp_path),
+        "review latest P11B implementation",
+        session_context="Ralph just completed P11B.1; current ask is next safest step.",
+    )
+    by_kind = {item["kind"]: item for item in evidence}
+    inventory = by_kind["deep_context_file_inventory"]["output"]
+
+    assert by_kind["deep_context_file_inventory"]["command"] == "P11B artifact bundle"
+    assert "src/data/revolut-x-readonly-collector-guard.mjs" in inventory
+    assert "tests/revolut-x-readonly-collector-guard.test.mjs" in inventory
+    assert ".omx/plans/final-p11b-authenticated-read-only-data-contract.md" in inventory
+    assert ".omx/security/revolut-x-p11b-key-governance.md" in inventory
+    assert ".omx/control/revolut-x-p11b-readonly-control-template.json" in inventory
+    assert ".omx/validation/p11b-final/completion-audit.json" in inventory
 
 
 def test_extract_context_file_paths_preserves_dot_paths():
