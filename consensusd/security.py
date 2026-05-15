@@ -15,6 +15,7 @@ TOOL_PERMISSIONS: dict[ToolRole, set[str]] = {
         "start_consensus_review",
         "get_consensus_status",
         "get_consensus_brief",
+        "watch_consensus_progress",
         "get_consensus_transcript",
         "cancel_consensus_review",
         "approve_ralph_handoff",

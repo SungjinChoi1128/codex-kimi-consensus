@@ -135,17 +135,36 @@ class SubprocessCodexRunner:
                 str(output_path),
                 prompt,
             ]
-            result = subprocess.run(
+            print(
+                f"[consensusd] run={run.run_id} phase=codex.{phase} starting "
+                f"timeout={self.settings.subprocess_timeout_sec}s output={output_path}",
+                flush=True,
+            )
+            process = subprocess.Popen(
                 command,
                 cwd=run.project_root,
-                check=False,
                 capture_output=True,
                 text=True,
-                timeout=self.settings.subprocess_timeout_sec,
             )
-            output = output_path.read_text() if output_path.exists() else result.stdout
-            if result.returncode != 0:
-                details = (result.stderr or result.stdout or "").strip()
+            print(f"[consensusd] run={run.run_id} phase=codex.{phase} pid={process.pid}", flush=True)
+            try:
+                stdout, stderr = process.communicate(timeout=self.settings.subprocess_timeout_sec)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise RuntimeError(
+                    f"codex subprocess timed out during {phase} after "
+                    f"{self.settings.subprocess_timeout_sec}s; pid={process.pid}; "
+                    f"stdout_tail={stdout[-1000:]!r}; stderr_tail={stderr[-1000:]!r}"
+                ) from exc
+            print(
+                f"[consensusd] run={run.run_id} phase=codex.{phase} completed "
+                f"pid={process.pid} returncode={process.returncode}",
+                flush=True,
+            )
+            output = output_path.read_text() if output_path.exists() else stdout
+            if process.returncode != 0:
+                details = (stderr or stdout or "").strip()
                 raise RuntimeError(f"codex subprocess failed during {phase}: {details}")
             output = output.strip()
             if not output:

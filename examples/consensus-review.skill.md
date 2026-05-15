@@ -11,12 +11,14 @@ Workflow:
 1. Prefer the MCP tool `start_consensus_review` when the `consensus` MCP server is already available.
 2. If the MCP server is not available, run the one-shot local command from the current repo instead of asking the user to open another terminal:
    `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run consensusd review "<objective>" --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit`
-3. Return the `run_id`, current status, approval gate state, final brief, and concise Kimi/Codex negotiation summary. Do not paste the full transcript unless the user asks.
-4. Use `get_consensus_brief` first when the user asks what is happening; it is the Codex-friendly progress surface.
-5. Use `get_consensus_status` for raw state and `get_consensus_transcript` when the user asks for the full transcript.
-6. If using CLI fallback, use `consensusd review` for the one-command path, `consensusd brief` for progress, `consensusd status` for raw state, `consensusd transcript` only when asked, and `consensusd approve` for handoff approval through `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run ...`.
-7. Do not claim the workflow is complete until status is `OMX_GENERATED`, `AWAITING_HUMAN_APPROVAL`, or `RALPH_HANDOFF_COMPLETE`.
-8. Pause for explicit user approval before Ralph handoff by calling `approve_ralph_handoff` or running `consensusd approve`.
+3. Return the `run_id` immediately, then keep the user connected with progress. If the run is not terminal or approval-gated, call `watch_consensus_progress(run_id, wait_seconds=30, interval_seconds=5)` and summarize the returned samples. Repeat while the user is waiting for the review, unless they ask you to stop or switch tasks.
+4. Use `get_consensus_brief` first when the user asks what is happening; it is the Codex-friendly point-in-time progress surface.
+5. Use `watch_consensus_progress` instead of raw `sleep` when waiting in Codex CLI. Never silently sleep and then fetch a full transcript as the default progress UX.
+6. Use `get_consensus_status` for raw state and `get_consensus_transcript` when the user asks for the full transcript or when the run reaches `AWAITING_HUMAN_APPROVAL`, `RALPH_HANDOFF_COMPLETE`, `FAILED`, or `CANCELLED`.
+7. While the run is active, print a concise progress update when phase, heartbeat, artifact counts, Kimi status, live changed files, OMX path, or error changes. Example shape: `round 1/5 · codex.proposal · heartbeat 2 · waiting for Codex proposal`. During `codex.revision`, if `changed_files` is non-empty, show `Codex is editing: <paths>`.
+8. If using CLI fallback, use `consensusd review` for the one-command path, `consensusd brief` for progress, `consensusd status` for raw state, `consensusd transcript` only when asked, and `consensusd approve` for handoff approval through `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run ...`.
+9. Do not claim the workflow is complete until status is `OMX_GENERATED`, `AWAITING_HUMAN_APPROVAL`, or `RALPH_HANDOFF_COMPLETE`.
+10. Pause for explicit user approval before Ralph handoff by calling `approve_ralph_handoff` or running `consensusd approve`.
 
 For background MCP setup without visible server terminals, use:
 

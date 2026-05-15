@@ -6,7 +6,7 @@ import time
 from consensusd.db import Database
 from consensusd.mcp_server import ConsensusService
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run, RunStatus
-from consensusd.orchestrator import Orchestrator, editable_path_violation, git_changed_files
+from consensusd.orchestrator import Orchestrator, editable_path_violation, extract_commit_refs, git_changed_files
 from consensusd.settings import Settings
 
 
@@ -118,6 +118,37 @@ class FileAwareKimiRunner:
 
     def generate_omx(self, run: Run, consensus_proposal: Proposal, evidence: list[Evidence]) -> str:
         raise NotImplementedError
+
+
+class CancellingCodexRunner:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def generate_proposal(self, run: Run, prior_review: Review | None, evidence: list[Evidence]) -> str:
+        self.db.transition_run(run.run_id, RunStatus.CANCELLED, expected_version=run.version)
+        return "# Late proposal after cancellation"
+
+    def review_proposal(self, run: Run, proposal: Proposal, evidence: list[Evidence]) -> ReviewDecision:
+        raise NotImplementedError
+
+    def generate_omx(self, run: Run, consensus_proposal: Proposal, evidence: list[Evidence]) -> str:
+        raise NotImplementedError
+
+
+def test_cancel_during_runner_prevents_late_proposal_write(tmp_path):
+    settings = Settings(db_path=tmp_path / "consensus.sqlite", project_root=tmp_path)
+    db = Database(settings.db_path)
+    db.init()
+    run = db.create_run("cancel while codex is drafting", str(tmp_path), "approval-gated")
+    orchestrator = Orchestrator(db, settings, codex_runner=CancellingCodexRunner(db))
+
+    orchestrator.tick()
+    orchestrator.tick()
+    orchestrator.tick()
+
+    transcript = db.transcript(run.run_id)
+    assert transcript.run.status == RunStatus.CANCELLED
+    assert transcript.proposals == []
 
 
 def test_editable_runner_applies_revision_between_kimi_rounds(tmp_path):
@@ -242,6 +273,55 @@ def test_git_changed_files_handles_spaces_and_renames(tmp_path):
     (tmp_path / "new file.txt").write_text("new\n")
 
     assert git_changed_files(str(tmp_path)) == ["new file.txt", "renamed file.txt"]
+
+
+def test_initial_repo_evidence_includes_head_and_objective_commit(tmp_path):
+    init_git_repo(tmp_path)
+    changed = tmp_path / "p11b.txt"
+    changed.write_text("readonly guard\n")
+    subprocess.run(["git", "add", "p11b.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "p11b guard"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (tmp_path / "unrelated-dirty.txt").write_text("dirty\n")
+
+    settings = Settings(db_path=tmp_path / "consensus.sqlite", project_root=tmp_path)
+    db = Database(settings.db_path)
+    db.init()
+    run = db.create_run(
+        f"review the next step after commit {commit}",
+        str(tmp_path),
+        "approval-gated",
+        max_rounds=1,
+    )
+    orchestrator = Orchestrator(db, settings)
+
+    orchestrator.tick()
+
+    by_kind = {item.kind: item for item in db.list_evidence(run.run_id)}
+    assert "git_status_short" in by_kind
+    assert "git_diff_stat" in by_kind
+    assert "git_head_summary" in by_kind
+    assert "git_head_name_status" in by_kind
+    assert "git_objective_commit_summary" in by_kind
+    assert "git_objective_commit_name_status" in by_kind
+    assert "unrelated-dirty.txt" in by_kind["git_status_short"].output
+    assert "p11b.txt" in by_kind["git_objective_commit_name_status"].output
+
+
+def test_extract_commit_refs_ignores_non_hex_words():
+    assert extract_commit_refs("after commit 6f80e97 and ticket p11b") == ["6f80e97"]
 
 
 class SlowApprovingKimiRunner(FileAwareKimiRunner):

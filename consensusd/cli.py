@@ -362,12 +362,14 @@ def brief_command(run_id: str, db: Path = DEFAULT_DB, json_output: bool = False)
 
 def watch_command(run_id: str, interval: float = 5.0, db: Path = DEFAULT_DB) -> None:
     service, _ = _service(db, None)
-    last_status = None
+    last_line = None
     while True:
+        brief = service.tool_get_consensus_brief(run_id)
         run = service.db.get_run(run_id)
-        if run.status != last_status:
-            print(f"{run.updated_at} {run.run_id} {run.status.value} round={run.current_round} version={run.version}")
-            last_status = run.status
+        line = f"{run.updated_at} {run.run_id} {_progress_line(brief)}"
+        if line != last_line:
+            print(line)
+            last_line = line
         if run.status in {
             RunStatus.AWAITING_HUMAN_APPROVAL,
             RunStatus.RALPH_HANDOFF_COMPLETE,

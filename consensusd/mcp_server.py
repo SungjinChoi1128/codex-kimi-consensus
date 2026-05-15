@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -74,6 +75,45 @@ class ConsensusService:
 
     def tool_get_consensus_brief(self, run_id: str) -> dict[str, Any]:
         return build_consensus_brief(self.db.transcript(run_id))
+
+    def tool_watch_consensus_progress(self, run_id: str, wait_seconds: int = 30, interval_seconds: int = 5) -> dict[str, Any]:
+        wait_seconds = max(1, min(wait_seconds, 120))
+        interval_seconds = max(1, min(interval_seconds, wait_seconds))
+        deadline = time.monotonic() + wait_seconds
+        samples: list[dict[str, Any]] = []
+        last_signature: tuple[Any, ...] | None = None
+        terminal = False
+
+        while True:
+            brief = self.tool_get_consensus_brief(run_id)
+            event = brief.get("latest_phase_event") or {}
+            payload = event.get("payload", {}) if isinstance(event, dict) else {}
+            signature = (
+                brief["status"],
+                brief["current_phase"],
+                brief["round"],
+                event.get("event_type") if isinstance(event, dict) else None,
+                payload.get("heartbeat") if isinstance(payload, dict) else None,
+                brief.get("artifact_counts", {}),
+            )
+            if signature != last_signature:
+                samples.append(progress_sample(brief))
+                last_signature = signature
+            terminal = brief["status"] in {
+                RunStatus.AWAITING_HUMAN_APPROVAL.value,
+                RunStatus.RALPH_HANDOFF_COMPLETE.value,
+                RunStatus.FAILED.value,
+                RunStatus.CANCELLED.value,
+            }
+            if terminal or time.monotonic() >= deadline:
+                return {
+                    "run_id": run_id,
+                    "terminal": terminal,
+                    "elapsed_wait_seconds": wait_seconds,
+                    "latest": progress_sample(brief),
+                    "samples": samples,
+                }
+            time.sleep(min(interval_seconds, max(0.0, deadline - time.monotonic())))
 
     def tool_get_consensus_transcript(self, run_id: str) -> dict[str, Any]:
         result = self.db.transcript(run_id).model_dump(mode="json")
@@ -227,6 +267,21 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
     @mcp.tool()
     def get_consensus_brief(run_id: str, ctx: Context) -> dict[str, Any]:
         return call("get_consensus_brief", ctx, run_id=run_id)
+
+    @mcp.tool()
+    def watch_consensus_progress(
+        run_id: str,
+        ctx: Context,
+        wait_seconds: int = 30,
+        interval_seconds: int = 5,
+    ) -> dict[str, Any]:
+        return call(
+            "watch_consensus_progress",
+            ctx,
+            run_id=run_id,
+            wait_seconds=wait_seconds,
+            interval_seconds=interval_seconds,
+        )
 
     @mcp.tool()
     def get_consensus_transcript(run_id: str, ctx: Context) -> dict[str, Any]:
@@ -383,6 +438,31 @@ def latest_evidence(evidence, kind: str):
     return matches[-1] if matches else None
 
 
+def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
+    event = brief.get("latest_phase_event") or {}
+    payload = event.get("payload", {}) if isinstance(event, dict) else {}
+    heartbeat = payload.get("heartbeat") if isinstance(payload, dict) else None
+    elapsed = payload.get("elapsed_seconds") if isinstance(payload, dict) else None
+    return {
+        "status": brief["status"],
+        "phase": brief["current_phase"],
+        "round": brief["round"],
+        "max_rounds": brief["max_rounds"],
+        "heartbeat": heartbeat,
+        "elapsed_seconds": elapsed,
+        "latest_event": event.get("event_type") if isinstance(event, dict) else None,
+        "changed_files": payload.get("changed_files", []) if isinstance(payload, dict) else [],
+        "next_action": brief["next_action"],
+        "last_kimi_status": brief.get("last_kimi_status"),
+        "last_kimi_summary": brief.get("last_kimi_summary"),
+        "last_codex_summary": brief.get("last_codex_summary"),
+        "omx_plan_path": brief.get("omx_plan_path"),
+        "context_bridge_path": brief.get("context_bridge_path"),
+        "artifact_counts": brief.get("artifact_counts", {}),
+        "error": brief.get("error"),
+    }
+
+
 def parse_json(text: str) -> dict[str, Any]:
     try:
         value = json.loads(text)
@@ -397,8 +477,12 @@ def summarize_text(text: str, limit: int) -> str:
 
 
 def current_phase(status: str, phase_events: list[dict[str, Any]]) -> str:
-    if phase_events and phase_events[-1]["event_type"].endswith(".started"):
-        return phase_events[-1]["event_type"]
+    if phase_events:
+        event_type = phase_events[-1]["event_type"]
+        if event_type.endswith(".heartbeat"):
+            return event_type.removesuffix(".heartbeat")
+        if event_type.endswith(".started"):
+            return event_type.removesuffix(".started")
     return status
 
 

@@ -190,6 +190,8 @@ class Orchestrator:
                 runner,
                 lambda: runner.generate_proposal(run, prior_review, self.db.list_evidence(run.run_id)),
             )
+            if is_terminal(self.db.get_run(run.run_id).status):
+                return
             self.db.add_proposal(run.run_id, run.current_round, content, runner=runner_name(runner))
             self._record_repo_stat(run, "git_diff_stat_before_kimi_review")
             latest = self.db.get_run(run.run_id)
@@ -207,6 +209,8 @@ class Orchestrator:
                 runner,
                 lambda: runner.review_proposal(run, proposal, self.db.list_evidence(run.run_id)),
             )
+            if is_terminal(self.db.get_run(run.run_id).status):
+                return
             self._phase_event(run, "kimi.review.verdict", runner=runner_name(runner), review_status=decision.status.value)
             self.db.add_review(run.run_id, run.current_round, decision.status, decision.content, runner=runner_name(runner))
             latest = self.db.get_run(run.run_id)
@@ -241,6 +245,8 @@ class Orchestrator:
                 runner,
                 lambda: runner.generate_omx(run, proposal, self.db.list_evidence(run.run_id)),
             )
+            if is_terminal(self.db.get_run(run.run_id).status):
+                return
             plan_path = self._write_omx_plan(run, content)
             self._phase_event(run, "codex.omx.written", runner=runner_name(runner), path=plan_path)
             self.db.add_omx_plan(run.run_id, content, runner=runner_name(runner), path=plan_path)
@@ -268,15 +274,16 @@ class Orchestrator:
         existing = self.db.list_evidence(run.run_id)
         if any(item.kind == "git_diff_stat" for item in existing):
             return
-        status, output = run_fixed_git_command(run.project_root, "git diff --stat")
-        self.db.add_evidence(
-            run.run_id,
-            run.current_round,
-            "git_diff_stat",
-            status,
-            output or "(no working-tree diff reported by git diff --stat)",
-            command="git diff --stat",
-        )
+        for kind, command, empty_message in initial_git_evidence_commands(run.objective):
+            status, output = run_fixed_git_command(run.project_root, command)
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                kind,
+                status,
+                output or empty_message,
+                command=command,
+            )
 
     def _record_repo_stat(self, run: Run, kind: str) -> None:
         status, output = run_fixed_git_command(run.project_root, "git diff --stat")
@@ -336,6 +343,7 @@ class Orchestrator:
                     runner=label,
                     elapsed_seconds=round(time.monotonic() - started, 3),
                     heartbeat=heartbeats,
+                    **self._heartbeat_progress_payload(run, event_prefix),
                 )
 
         elapsed = round(time.monotonic() - started, 3)
@@ -344,6 +352,11 @@ class Orchestrator:
             raise errors[0]
         self._phase_event(run, f"{event_prefix}.completed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
         return result[0]
+
+    def _heartbeat_progress_payload(self, run: Run, event_prefix: str) -> dict[str, object]:
+        if event_prefix != "codex.revision":
+            return {}
+        return {"changed_files": git_changed_files(run.project_root)}
 
     def _ensure_context_bridge(self, run: Run) -> None:
         transcript = self.db.transcript(run.run_id)
@@ -628,16 +641,13 @@ def git_diff_hash(project_root: str, path: str) -> str:
 
 
 def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
-    allowed = {
-        "git diff --stat": ["git", "diff", "--stat"],
-        "git diff": ["git", "diff"],
-    }
-    if command not in allowed:
+    argv = fixed_git_argv(command)
+    if argv is None:
         raise ValueError("unsupported fixed verification command")
     if not is_git_repo(project_root):
         return "FAILED", f"not a git repository: {Path(project_root)}"
     result = subprocess.run(
-        allowed[command],
+        argv,
         cwd=Path(project_root),
         check=False,
         capture_output=True,
@@ -646,6 +656,79 @@ def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
     )
     status = "OK" if result.returncode == 0 else "FAILED"
     return status, result.stdout + result.stderr
+
+
+COMMIT_REF_RE = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
+
+
+def initial_git_evidence_commands(objective: str) -> list[tuple[str, str, str]]:
+    """Return fixed, safe git evidence commands for a new review run.
+
+    The working tree diff alone is misleading after the user has committed the
+    change they want reviewed. We always capture HEAD plus explicit commit refs
+    mentioned in the objective, while still avoiding arbitrary shell execution.
+    """
+    commands: list[tuple[str, str, str]] = [
+        ("git_status_short", "git status --short", "(working tree clean)"),
+        ("git_diff_stat", "git diff --stat", "(no working-tree diff reported by git diff --stat)"),
+        ("git_head_summary", "git show --stat --oneline --decorate HEAD", "(no HEAD commit summary available)"),
+        ("git_head_name_status", "git show --name-status --oneline --decorate HEAD", "(no HEAD name-status available)"),
+    ]
+    seen: set[str] = {"HEAD"}
+    for ref in extract_commit_refs(objective):
+        normalized = ref.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        commands.append(
+            (
+                "git_objective_commit_summary",
+                f"git show --stat --oneline --decorate {normalized}",
+                f"(no summary available for objective commit {normalized})",
+            )
+        )
+        commands.append(
+            (
+                "git_objective_commit_name_status",
+                f"git show --name-status --oneline --decorate {normalized}",
+                f"(no name-status available for objective commit {normalized})",
+            )
+        )
+    return commands
+
+
+def extract_commit_refs(text: str) -> list[str]:
+    return [match.group(0) for match in COMMIT_REF_RE.finditer(text)]
+
+
+def fixed_git_argv(command: str) -> Optional[list[str]]:
+    allowed = {
+        "git diff --stat": ["git", "diff", "--stat"],
+        "git diff": ["git", "diff"],
+        "git status --short": ["git", "status", "--short"],
+        "git show --stat --oneline --decorate HEAD": ["git", "show", "--stat", "--oneline", "--decorate", "HEAD"],
+        "git show --name-status --oneline --decorate HEAD": [
+            "git",
+            "show",
+            "--name-status",
+            "--oneline",
+            "--decorate",
+            "HEAD",
+        ],
+    }
+    if command in allowed:
+        return allowed[command]
+    stat_prefix = "git show --stat --oneline --decorate "
+    name_prefix = "git show --name-status --oneline --decorate "
+    if command.startswith(stat_prefix):
+        ref = command.removeprefix(stat_prefix)
+        if COMMIT_REF_RE.fullmatch(ref):
+            return ["git", "show", "--stat", "--oneline", "--decorate", ref]
+    if command.startswith(name_prefix):
+        ref = command.removeprefix(name_prefix)
+        if COMMIT_REF_RE.fullmatch(ref):
+            return ["git", "show", "--name-status", "--oneline", "--decorate", ref]
+    return None
 
 
 def changed_files_from_diff_stat(stat_output: str) -> list[str]:
