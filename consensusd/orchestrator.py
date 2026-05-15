@@ -291,6 +291,20 @@ class Orchestrator:
                 output or empty_message,
                 command=command,
             )
+        self._record_deep_context_evidence(run)
+
+    def _record_deep_context_evidence(self, run: Run) -> None:
+        if not is_git_repo(run.project_root):
+            return
+        for item in build_deep_context_evidence(run.project_root, run.objective):
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                item["kind"],
+                item["status"],
+                item["output"],
+                command=item.get("command"),
+            )
 
     def _record_repo_stat(self, run: Run, kind: str) -> None:
         status, output = run_fixed_git_command(run.project_root, "git diff --stat")
@@ -721,6 +735,201 @@ def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
     )
     status = "OK" if result.returncode == 0 else "FAILED"
     return status, result.stdout + result.stderr
+
+
+EvidenceItem = dict[str, str]
+DEEP_CONTEXT_CHAR_LIMIT = 120_000
+DEEP_CONTEXT_FILE_LIMIT = 24
+DEEP_CONTEXT_PER_FILE_LIMIT = 20_000
+RELEVANT_NAME_RE = re.compile(r"(p11b|revolut|readonly|read-only|collector|guard|control-template|key-governance)", re.I)
+TEXT_SUFFIXES = {
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".json",
+    ".md",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".txt",
+}
+
+
+def build_deep_context_evidence(project_root: str, objective: str) -> list[EvidenceItem]:
+    """Build a bounded repo-context packet for real agent proposal quality.
+
+    This is deliberately not generic shell access: it uses fixed git argv,
+    repo-local file reads, denylisted private paths, and hard caps. The goal is
+    to keep Codex's first proposal deep without letting it wander indefinitely.
+    """
+
+    root = Path(project_root)
+    items: list[EvidenceItem] = []
+    files: list[str] = []
+    for ref in extract_commit_refs(objective)[:2]:
+        normalized = ref.lower()
+        changed = git_commit_changed_files(project_root, normalized)
+        files.extend(changed)
+        if changed:
+            diff = git_commit_diff(project_root, normalized, changed[:DEEP_CONTEXT_FILE_LIMIT])
+            items.append(
+                {
+                    "kind": "objective_commit_diff",
+                    "status": "OK",
+                    "command": f"git show --unified=120 --find-renames {normalized} -- <changed files>",
+                    "output": cap_text(diff, DEEP_CONTEXT_CHAR_LIMIT),
+                }
+            )
+    files.extend(discover_relevant_context_files(root))
+    files = unique_preserve_order(file for file in files if safe_context_file(root, file))[:DEEP_CONTEXT_FILE_LIMIT]
+    if files:
+        items.append(
+            {
+                "kind": "deep_context_file_inventory",
+                "status": "OK",
+                "command": "repo-local bounded context discovery",
+                "output": "\n".join(files),
+            }
+        )
+        items.append(
+            {
+                "kind": "deep_context_file_contents",
+                "status": "OK",
+                "command": "repo-local bounded file reads",
+                "output": cap_text(read_context_files(root, files), DEEP_CONTEXT_CHAR_LIMIT),
+            }
+        )
+    package_json = root / "package.json"
+    if package_json.is_file():
+        items.append(
+            {
+                "kind": "package_scripts_context",
+                "status": "OK",
+                "command": "read package.json scripts",
+                "output": cap_text(package_json.read_text(errors="replace"), 20_000),
+            }
+        )
+    return items
+
+
+def git_commit_changed_files(project_root: str, ref: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", ref],
+        cwd=Path(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def git_commit_diff(project_root: str, ref: str, files: list[str]) -> str:
+    argv = ["git", "show", "--unified=120", "--find-renames", "--format=fuller", ref, "--", *files]
+    result = subprocess.run(
+        argv,
+        cwd=Path(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result.stdout + result.stderr
+
+
+def discover_relevant_context_files(root: Path) -> list[str]:
+    candidates: list[str] = []
+    for path in root.rglob("*"):
+        if len(candidates) >= 80:
+            break
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if not safe_context_file(root, rel):
+            continue
+        if RELEVANT_NAME_RE.search(rel):
+            candidates.append(rel)
+    return sorted(candidates, key=context_file_rank)
+
+
+def context_file_rank(path: str) -> tuple[int, int, str]:
+    priority = 0
+    if path.startswith(("src/", "scripts/", "tests/")):
+        priority -= 20
+    if path.startswith((".omx/plans/", ".omx/security/", ".omx/research/", "omx_wiki/")):
+        priority -= 10
+    if "p11b" in path.lower():
+        priority -= 10
+    return priority, len(path), path
+
+
+def safe_context_file(root: Path, rel: str) -> bool:
+    rel = rel.replace("\\", "/").lstrip("/")
+    if not rel or rel.endswith("/"):
+        return False
+    denied_prefixes = (
+        ".git/",
+        ".consensusd/",
+        ".env",
+        ".ssh/",
+        "node_modules/",
+        "dist/",
+        "build/",
+        ".venv/",
+        "venv/",
+    )
+    if any(rel == prefix.rstrip("/") or rel.startswith(prefix) for prefix in denied_prefixes):
+        return False
+    path = root / rel
+    if not path.is_file():
+        return False
+    if path.suffix.lower() not in TEXT_SUFFIXES:
+        return False
+    try:
+        return path.stat().st_size <= 250_000
+    except OSError:
+        return False
+
+
+def read_context_files(root: Path, files: list[str]) -> str:
+    blocks: list[str] = []
+    for rel in files:
+        path = root / rel
+        try:
+            text = path.read_text(errors="replace")
+        except OSError as exc:
+            text = f"(failed to read: {exc})"
+        blocks.extend(
+            [
+                f"## {rel}",
+                "",
+                "```text",
+                cap_text(text, DEEP_CONTEXT_PER_FILE_LIMIT),
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(blocks)
+
+
+def cap_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"\n\n... truncated at {limit} characters by consensusd context cap ..."
+
+
+def unique_preserve_order(values) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 COMMIT_REF_RE = re.compile(r"\b[0-9a-fA-F]{7,40}\b")

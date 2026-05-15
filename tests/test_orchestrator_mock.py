@@ -6,7 +6,7 @@ import time
 from consensusd.db import Database
 from consensusd.mcp_server import ConsensusService
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run, RunStatus
-from consensusd.orchestrator import Orchestrator, editable_path_violation, extract_commit_refs, git_changed_files
+from consensusd.orchestrator import Orchestrator, editable_path_violation, extract_commit_refs, git_changed_files, build_deep_context_evidence
 from consensusd.settings import Settings
 
 
@@ -316,8 +316,31 @@ def test_initial_repo_evidence_includes_head_and_objective_commit(tmp_path):
     assert "git_head_name_status" in by_kind
     assert "git_objective_commit_summary" in by_kind
     assert "git_objective_commit_name_status" in by_kind
+    assert "objective_commit_diff" in by_kind
+    assert "deep_context_file_inventory" in by_kind
+    assert "deep_context_file_contents" in by_kind
     assert "unrelated-dirty.txt" in by_kind["git_status_short"].output
     assert "p11b.txt" in by_kind["git_objective_commit_name_status"].output
+    assert "readonly guard" in by_kind["objective_commit_diff"].output
+    assert "p11b.txt" in by_kind["deep_context_file_contents"].output
+
+
+def test_deep_context_evidence_excludes_private_local_paths(tmp_path):
+    init_git_repo(tmp_path)
+    (tmp_path / ".env").write_text("SECRET=do-not-read\n")
+    (tmp_path / ".consensusd").mkdir()
+    (tmp_path / ".consensusd" / "private.txt").write_text("do-not-read\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "revolut-p11b-collector.mjs").write_text("safe context\n")
+    subprocess.run(["git", "add", "src/revolut-p11b-collector.mjs"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "add p11b context"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    evidence = build_deep_context_evidence(str(tmp_path), f"review {commit}")
+    joined = "\n".join(item["output"] for item in evidence)
+
+    assert "safe context" in joined
+    assert "do-not-read" not in joined
 
 
 def test_extract_commit_refs_ignores_non_hex_words():

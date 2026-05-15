@@ -22,7 +22,7 @@ class Settings:
     orchestrator_token: str = "dev-orchestrator-token"
     dev_auth_role: Optional[str] = None
     runner_mode: str = "mock"
-    subprocess_timeout_sec: int = 1800
+    subprocess_timeout_sec: int = 3600
     heartbeat_interval_sec: float = 30.0
     editable_allowed_paths: tuple[str, ...] = ()
     editable_denied_paths: tuple[str, ...] = (
@@ -62,7 +62,7 @@ class Settings:
             orchestrator_token=os.getenv("CONSENSUSD_ORCHESTRATOR_TOKEN", "dev-orchestrator-token"),
             dev_auth_role=dev_auth_role or os.getenv("CONSENSUSD_DEV_AUTH_ROLE"),
             runner_mode=runner_mode or os.getenv("CONSENSUSD_RUNNER_MODE", "mock"),
-            subprocess_timeout_sec=int(os.getenv("CONSENSUSD_SUBPROCESS_TIMEOUT_SEC", "1800")),
+            subprocess_timeout_sec=int(os.getenv("CONSENSUSD_SUBPROCESS_TIMEOUT_SEC", "3600")),
             heartbeat_interval_sec=float(os.getenv("CONSENSUSD_HEARTBEAT_INTERVAL_SEC", "30")),
             editable_allowed_paths=tuple(allowed),
             editable_denied_paths=tuple(denied)

@@ -185,14 +185,14 @@ Long runner calls also emit periodic `*.heartbeat` events. Configure the interva
 export CONSENSUSD_HEARTBEAT_INTERVAL_SEC=30
 ```
 
-Real Codex/Kimi phases default to a 30 minute subprocess timeout. For unusually deep reviews, raise it with either an environment variable or the CLI flag:
+Real Codex/Kimi phases default to a 60 minute subprocess timeout. For unusually deep reviews, raise it with either an environment variable or the CLI flag:
 
 ```bash
 export CONSENSUSD_SUBPROCESS_TIMEOUT_SEC=3600
 uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600
 ```
 
-Codex proposal and OMX prompts are intentionally bounded: they should use captured evidence first and record missing evidence instead of running broad scans until timeout. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
+Codex proposal prompts receive a bounded deep context packet before the subprocess starts: objective commit diff, relevant current files, P11B/Revolut artifacts, package/test context, and capped repo-local file contents. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
 
 ## Editable Mode Guardrails
 

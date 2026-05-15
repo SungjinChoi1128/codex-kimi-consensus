@@ -524,7 +524,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
     ) -> None:
         """Start the localhost daemon."""
@@ -542,7 +542,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
     ) -> None:
         """Start background localhost MCP endpoints; no extra terminal needed."""
@@ -570,7 +570,7 @@ if typer is not None:
         subprocess_timeout_sec: Optional[int] = typer.Option(
             None,
             "--subprocess-timeout-sec",
-            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 1800.",
+            help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
     ) -> None:
         """Start, watch, and print an approval-gated review in one Codex-friendly command."""
