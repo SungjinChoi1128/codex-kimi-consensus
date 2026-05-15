@@ -473,6 +473,11 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
     latest_proposal = transcript.proposals[-1] if transcript.proposals else None
     latest_plan = transcript.omx_plans[-1] if transcript.omx_plans else None
     latest_bridge = transcript.context_bridges[-1] if transcript.context_bridges else None
+    ralph_prompt = build_ralph_handoff_prompt(
+        run,
+        latest_plan.path if latest_plan else None,
+        latest_bridge.path if latest_bridge else None,
+    )
     latest_change = latest_evidence(transcript.evidence, "editable_change_summary")
     change_summary = parse_json(latest_change.output) if latest_change else {}
     phase_events = [
@@ -513,6 +518,8 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
         "guardrail_violations": change_summary.get("violations", []),
         "omx_plan_path": latest_plan.path if latest_plan else None,
         "context_bridge_path": latest_bridge.path if latest_bridge else None,
+        "ralph_handoff_prompt": ralph_prompt,
+        "ralph_handoff_note": ralph_handoff_note(run.status.value, bool(latest_plan)),
         "next_action": next_action(run.status.value, latest_review.status.value if latest_review else None),
         "phase_events": phase_events[-10:],
         "artifact_counts": {
@@ -523,6 +530,49 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
             "context_bridges": len(transcript.context_bridges),
         },
     }
+
+
+def build_ralph_handoff_prompt(run, plan_path: Optional[str], bridge_path: Optional[str]) -> Optional[str]:
+    if run.status != RunStatus.AWAITING_HUMAN_APPROVAL:
+        return None
+    if not plan_path:
+        return None
+    plan_ref = project_relative_path(run.project_root, plan_path)
+    bridge_ref = project_relative_path(run.project_root, bridge_path) if bridge_path else None
+    lines = [
+        f"$ralph Execute the approved consensus OMX plan at {plan_ref}.",
+        "",
+        "Use the consensus transcript as the source of agreement. Codex owns the implementation plan; Kimi's critique is review context that has already been adjudicated.",
+    ]
+    if bridge_ref:
+        lines.append(f"Use the context bridge at {bridge_ref} for the Codex/Kimi disagreement summary, risks, and verification expectations.")
+    lines.extend(
+        [
+            "",
+            "Do not treat consensusd audit approval as implementation. Implement only the approved plan, preserve its safety constraints, gather fresh verification evidence, and stop only after machine-readable completion evidence is recorded.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def ralph_handoff_note(status: str, has_plan: bool) -> Optional[str]:
+    if status != RunStatus.AWAITING_HUMAN_APPROVAL.value:
+        return None
+    if not has_plan:
+        return "Ralph handoff is paused, but no OMX plan path is recorded yet."
+    return (
+        "Paste ralph_handoff_prompt into Codex CLI to start Ralph. "
+        "approve_ralph_handoff records the consensusd audit gate; it does not itself run Ralph."
+    )
+
+
+def project_relative_path(project_root: str, path: Optional[str]) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).resolve().relative_to(Path(project_root).resolve()).as_posix()
+    except (OSError, ValueError):
+        return str(path)
 
 
 def latest_evidence(evidence, kind: str):
@@ -557,6 +607,8 @@ def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
         "last_codex_summary": brief.get("last_codex_summary"),
         "omx_plan_path": brief.get("omx_plan_path"),
         "context_bridge_path": brief.get("context_bridge_path"),
+        "ralph_handoff_prompt": brief.get("ralph_handoff_prompt"),
+        "ralph_handoff_note": brief.get("ralph_handoff_note"),
         "artifact_counts": brief.get("artifact_counts", {}),
         "error": brief.get("error"),
     }

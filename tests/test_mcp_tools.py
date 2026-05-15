@@ -20,6 +20,22 @@ def make_app(tmp_path, port=8787):
     return settings, app
 
 
+def transition_to_approval_gate(service, run):
+    for status in [
+        RunStatus.AWAITING_CODEX_PROPOSAL,
+        RunStatus.CODEX_DRAFTING,
+        RunStatus.AWAITING_KIMI_REVIEW,
+        RunStatus.KIMI_REVIEWING,
+        RunStatus.CONSENSUS_LOCKED,
+        RunStatus.AWAITING_OMX,
+        RunStatus.OMX_GENERATING,
+        RunStatus.OMX_GENERATED,
+        RunStatus.AWAITING_HUMAN_APPROVAL,
+    ]:
+        run = service.db.transition_run(run.run_id, status, expected_version=run.version)
+    return run
+
+
 def free_port():
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -316,6 +332,25 @@ def test_consensus_brief_summarizes_run_for_codex(tmp_path):
     assert brief["omx_plan_path"] == "/tmp/plan.md"
     assert brief["context_bridge_path"] == "/tmp/bridge.md"
     assert brief["artifact_counts"]["context_bridges"] == 1
+
+
+def test_consensus_brief_shows_codex_cli_ralph_handoff_prompt_at_approval_gate(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
+    run = transition_to_approval_gate(service, run)
+    plan_path = tmp_path / ".omx" / "plans" / "consensus-omx-test.md"
+    bridge_path = tmp_path / ".omx" / "plans" / "context-bridge-test.md"
+    service.db.add_omx_plan(run.run_id, "plan", path=str(plan_path))
+    service.db.add_context_bridge(run.run_id, str(bridge_path), "bridge")
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["status"] == RunStatus.AWAITING_HUMAN_APPROVAL.value
+    assert brief["ralph_handoff_prompt"].startswith("$ralph Execute the approved consensus OMX plan")
+    assert ".omx/plans/consensus-omx-test.md" in brief["ralph_handoff_prompt"]
+    assert ".omx/plans/context-bridge-test.md" in brief["ralph_handoff_prompt"]
+    assert "approve_ralph_handoff records the consensusd audit gate" in brief["ralph_handoff_note"]
 
 
 def test_watch_consensus_progress_returns_codex_friendly_samples(tmp_path):

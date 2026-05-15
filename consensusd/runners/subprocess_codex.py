@@ -43,7 +43,8 @@ class SubprocessCodexRunner:
             "## Proposal\n"
             "Explain the proposed decision or implementation direction.\n\n"
             "## Evidence Reviewed\n"
-            "List exact files, commands, transcript state, and known missing evidence.\n\n"
+            "List exact files, commands, transcript state, and known missing evidence. Treat any approval packet as evidence now: "
+            "do not promise to collect proof later if the proof is needed for Kimi to approve this round.\n\n"
             "## Adjudication Summary\n"
             "If there is a prior Kimi review, include a markdown table: Kimi item | Codex decision | Plan change | Status. "
             "Respond point-by-point to every C/M/m item and every blocker. If there is no prior review, say initial round.\n\n"
@@ -200,10 +201,12 @@ def _proposal_context_instruction(evidence: list[Evidence]) -> str:
             "review anchor and reconcile claims against the supplied bounded file contents and explicit evidence only. "
             "Do not infer scope from current git status, current HEAD, or unrelated cleanup/tooling commits unless those "
             "git facts are explicitly present in the evidence packet. You may inspect a small number of additional named "
-            "repo files only if a specific uncertainty blocks the proposal."
+            "repo files only if a specific uncertainty blocks the proposal. Treat approval evidence as present-tense proof, "
+            "not as a future promise to gather proof after Kimi asks for it."
         )
     return (
         "Use the supplied deep context packet first: objective commit diff when provided, current relevant files, "
         "P11B/Revolut artifacts, and package/test context. You may inspect a small number of additional repo files "
-        "if a named uncertainty blocks the proposal."
+        "if a named uncertainty blocks the proposal. Treat approval evidence as present-tense proof, not as a future "
+        "promise to gather proof after Kimi asks for it."
     )

@@ -140,6 +140,11 @@ def _print_brief(data: dict[str, object]) -> None:
         print(f"\nOMX plan: {data['omx_plan_path']}")
     if data.get("context_bridge_path"):
         print(f"Context bridge: {data['context_bridge_path']}")
+    if data.get("ralph_handoff_prompt"):
+        print("\nCodex CLI Ralph handoff prompt")
+        print(str(data["ralph_handoff_prompt"]))
+    if data.get("ralph_handoff_note"):
+        print(f"\nRalph note: {data['ralph_handoff_note']}")
     events = data.get("phase_events") or []
     if events:
         print("\nRecent phases")

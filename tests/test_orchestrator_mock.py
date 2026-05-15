@@ -66,6 +66,11 @@ def test_mock_orchestrator_full_run_to_approval_gate(tmp_path):
     assert "Kimi-Codex Context Bridge" in bridge.content
     assert "Review Cycle Summary" in bridge.content
     assert "Ralph Handoff Context" in bridge.content
+    packets = [item for item in transcript.evidence if item.kind == "kimi_review_packet"]
+    assert [item.round for item in packets] == [1, 2]
+    assert "Kimi Review Evidence Packet" in packets[-1].output
+    packet_path = packets[-1].output.splitlines()[0].removeprefix("Packet path: ")
+    assert Path(packet_path).exists()
     assert service.db.path.exists()
 
 
@@ -94,6 +99,39 @@ def test_approval_gated_ralph_handoff(tmp_path):
     transcript = service.db.transcript(run.run_id)
     assert final.status == RunStatus.RALPH_HANDOFF_COMPLETE
     assert transcript.ralph_handoffs
+
+
+def test_attached_lease_expiry_does_not_cancel_human_approval_gate(tmp_path):
+    settings = Settings.from_env(db_path=tmp_path / "consensus.sqlite", project_root=tmp_path)
+    db = Database(settings.db_path)
+    db.init()
+    orchestrator = Orchestrator(db, settings)
+    run = db.create_run(
+        "pause safely at approval gate",
+        str(tmp_path),
+        "approval-gated",
+        lease_mode="attached",
+        lease_ttl_seconds=1,
+    )
+    for status in [
+        RunStatus.AWAITING_CODEX_PROPOSAL,
+        RunStatus.CODEX_DRAFTING,
+        RunStatus.AWAITING_KIMI_REVIEW,
+        RunStatus.KIMI_REVIEWING,
+        RunStatus.CONSENSUS_LOCKED,
+        RunStatus.AWAITING_OMX,
+        RunStatus.OMX_GENERATING,
+        RunStatus.OMX_GENERATED,
+        RunStatus.AWAITING_HUMAN_APPROVAL,
+    ]:
+        run = db.transition_run(run.run_id, status, expected_version=run.version)
+
+    time.sleep(1.1)
+
+    assert orchestrator._cancel_if_lease_expired(run.run_id) is False
+    transcript = db.transcript(run.run_id)
+    assert transcript.run.status == RunStatus.AWAITING_HUMAN_APPROVAL
+    assert all(event.event_type != "run.lease_expired" for event in transcript.events)
 
 
 class EditingCodexRunner:

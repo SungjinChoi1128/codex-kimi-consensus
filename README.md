@@ -9,9 +9,10 @@
 - Mock or subprocess Codex/Kimi runners negotiate until consensus is locked.
 - In editable e2e mode, Codex applies scoped repo revisions between Kimi review rounds and records the revision as durable evidence.
 - Phase and heartbeat events are appended for proposal, review, revision, and OMX generation so Codex can show progress without dumping the whole transcript.
+- Before each Kimi review, consensusd writes a bounded Kimi evidence packet with the current proposal, diff, relevant file contents, raw evidence, and approval checklist.
 - Codex then generates an OMX implementation plan.
 - The daemon pauses at `AWAITING_HUMAN_APPROVAL`.
-- Approval records a mock Ralph handoff packet for v1.
+- The approval brief shows a Codex CLI `$ralph ...` handoff prompt. `approve_ralph_handoff` records the daemon audit gate; it does not launch Ralph by itself.
 
 The daemon binds to `127.0.0.1` by default and refuses non-localhost binds. Tool permissions are enforced server-side from bearer tokens or a trusted internal caller role. Agents cannot spoof roles with normal tool arguments.
 
@@ -153,7 +154,7 @@ For user-facing progress, ask Codex for a brief. It should call:
 get_consensus_brief(run_id)
 ```
 
-The brief includes the current phase, latest Kimi verdict, Codex revision files, guardrail violations, OMX/context bridge paths, and the next action.
+The brief includes the current phase, latest Kimi verdict, Codex revision files, guardrail violations, OMX/context bridge paths, and the next action. When a run reaches `AWAITING_HUMAN_APPROVAL`, it also includes `ralph_handoff_prompt`, which is the user-facing text to paste into Codex CLI to start Ralph with the approved plan and context bridge.
 
 If the MCP server is not already connected in the current Codex session, Codex can run the whole approval-gated flow as a local command without a server terminal:
 
@@ -186,6 +187,7 @@ uv run consensusd down --db .consensusd/consensusd.sqlite
 `watch` exits at terminal states or `AWAITING_HUMAN_APPROVAL`.
 
 `brief` is the friendlier default for Codex/App UX. It summarizes the latest phase events and points to the OMX plan/context bridge instead of printing the full SQLite transcript.
+At the approval gate, `brief` also prints a Codex CLI Ralph handoff prompt. Use that prompt for the actual Ralph run; use `consensusd approve` only when you want consensusd to record that the audit gate was approved.
 
 For MCP-driven reviews, Codex should use `watch_consensus_progress(run_id, wait_seconds=30, interval_seconds=5, refresh_lease=true, lease_ttl_seconds=90)` rather than raw sleeps. The optional CLI `watch` command also refreshes attached leases by default; pass `--no-refresh-lease` only when deliberately testing lease expiry.
 
@@ -203,6 +205,8 @@ uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runne
 ```
 
 Codex proposal prompts receive a bounded deep context packet before the subprocess starts: explicit objective commit diff when present, optional `user_session_context`, relevant P11B/Revolut artifacts, filtered package/test context, and capped repo-local file contents. If the objective names a commit, consensusd intentionally excludes unrelated current-HEAD commit metadata. If session context is present and no commit is named, consensusd omits git evidence entirely and uses the session context plus bounded relevant file contents. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
+
+Kimi review prompts receive an additional `.omx/context/kimi-review-packet-*.md` before each review round. The packet front-loads the proposal under review, prior critique, current diff, changed files, relevant file contents, raw verification/runner evidence, and Kimi's approval checklist. This is designed to reduce avoidable ping-pong by making round 1 evidence inspectable instead of making Kimi ask for it later.
 
 ## Editable Mode Guardrails
 

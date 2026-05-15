@@ -16,9 +16,10 @@ Workflow:
 5. Use `watch_consensus_progress` instead of raw `sleep` when waiting in Codex CLI. Never silently sleep and then fetch a full transcript as the default progress UX. If the user interrupts the chat/tool wait, the attached lease will expire and consensusd will cancel active Codex/Kimi subprocesses.
 6. Use `get_consensus_status` for raw state and `get_consensus_transcript` when the user asks for the full transcript or when the run reaches `AWAITING_HUMAN_APPROVAL`, `RALPH_HANDOFF_COMPLETE`, `FAILED`, or `CANCELLED`.
 7. While the run is active, print a concise progress update when phase, heartbeat, artifact counts, Kimi status, live changed files, OMX path, or error changes. Example shape: `round 1/5 · codex.proposal · heartbeat 2 · waiting for Codex proposal`. During `codex.revision`, if `changed_files` is non-empty, show `Codex is editing: <paths>`.
-8. If using CLI fallback, use `consensusd review` for the one-command path, `consensusd brief` for progress, `consensusd status` for raw state, `consensusd transcript` only when asked, and `consensusd approve` for handoff approval through `uv --project /Users/sungjinchoi/Developer/codex-kimi-consensus run ...`.
-9. Do not claim the workflow is complete until status is `OMX_GENERATED`, `AWAITING_HUMAN_APPROVAL`, or `RALPH_HANDOFF_COMPLETE`.
-10. Pause for explicit user approval before Ralph handoff by calling `approve_ralph_handoff` or running `consensusd approve`.
+8. At `AWAITING_HUMAN_APPROVAL`, show `ralph_handoff_prompt` from `get_consensus_brief` or `watch_consensus_progress` as the user-facing Codex CLI handoff. Do not replace it with a terminal `consensusd approve` command. `approve_ralph_handoff` is audit bookkeeping for consensusd; the actual Ralph UX is pasting the `$ralph ...` prompt into Codex CLI.
+9. If using CLI fallback, use `consensusd review` for the one-command path, `consensusd brief` for progress, `consensusd status` for raw state, `consensusd transcript` only when asked, and `consensusd approve` only when the user wants to close the daemon's audit gate.
+10. Do not claim the workflow is complete until status is `OMX_GENERATED`, `AWAITING_HUMAN_APPROVAL`, or `RALPH_HANDOFF_COMPLETE`.
+11. Pause for explicit user approval before Ralph handoff. When approved, use the displayed `$ralph ...` prompt in Codex CLI for actual implementation, then call `approve_ralph_handoff` only if the daemon audit trail should record the handoff as approved.
 
 For background MCP setup without visible server terminals, use:
 

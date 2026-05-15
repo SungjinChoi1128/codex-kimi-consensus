@@ -202,6 +202,7 @@ class Orchestrator:
                 return
             self.db.add_proposal(run.run_id, run.current_round, content, runner=runner_name(runner))
             self._record_repo_stat(run, "git_diff_stat_before_kimi_review")
+            self._record_kimi_review_packet(run)
             latest = self.db.get_run(run.run_id)
             self.db.transition_run(run.run_id, RunStatus.AWAITING_KIMI_REVIEW, expected_version=latest.version)
             return
@@ -336,6 +337,27 @@ class Orchestrator:
             command="git diff --stat",
         )
 
+    def _record_kimi_review_packet(self, run: Run) -> None:
+        if any(item.kind == "kimi_review_packet" and item.round == run.current_round for item in self.db.list_evidence(run.run_id)):
+            return
+        path = self._kimi_review_packet_path(run)
+        content = build_kimi_review_packet_markdown(self.db.transcript(run.run_id), path)
+        packet_path = Path(path)
+        packet_path.parent.mkdir(parents=True, exist_ok=True)
+        packet_path.write_text(content)
+        self.db.add_evidence(
+            run.run_id,
+            run.current_round,
+            "kimi_review_packet",
+            "OK",
+            cap_text(f"Packet path: {path}\n\n{content}", DEEP_CONTEXT_CHAR_LIMIT),
+            command="consensusd generated Kimi review packet",
+        )
+
+    def _kimi_review_packet_path(self, run: Run) -> str:
+        context_dir = Path(run.project_root) / ".omx" / "context"
+        return str(context_dir / compact_artifact_name("kimi-review-packet", run))
+
     def _revision_enabled(self, run: Run, runner: AgentRunner) -> bool:
         return run.runner_mode.endswith("-edit") and hasattr(runner, "apply_revision")
 
@@ -430,6 +452,8 @@ class Orchestrator:
         latest = self.db.get_run(run_id)
         if is_terminal(latest.status):
             return True
+        if latest.status == RunStatus.AWAITING_HUMAN_APPROVAL:
+            return False
         if latest.lease_mode != "attached" or not latest.lease_expires_at:
             return False
         if parse_utc_iso(latest.lease_expires_at) > datetime.now(timezone.utc):
@@ -614,6 +638,96 @@ def build_context_bridge_markdown(transcript, path: str) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def build_kimi_review_packet_markdown(transcript, path: str) -> str:
+    run = transcript.run
+    root = Path(run.project_root)
+    changed = git_changed_files(run.project_root)
+    relevant_paths = kimi_review_packet_paths(transcript, changed)
+    lines: list[str] = [
+        f"# Kimi Review Evidence Packet — Round {run.current_round}",
+        "",
+        f"**Run ID:** `{run.run_id}`  ",
+        f"**Round:** `{run.current_round}`  ",
+        f"**Status at packet build:** `{run.status.value}`  ",
+        f"**Packet path:** `{path}`",
+        "",
+        "This packet is generated before Kimi review so Kimi can inspect evidence directly instead of requesting it in later rounds.",
+        "",
+        "## Current Codex Proposal",
+        "",
+        excerpt(transcript.proposals[-1].content, 16_000) if transcript.proposals else "(no proposal recorded)",
+        "",
+        "## Latest Kimi Review Being Addressed",
+        "",
+        excerpt(transcript.reviews[-1].content, 12_000) if transcript.reviews else "(initial review round)",
+        "",
+        "## Git Diff Stat",
+        "",
+        fenced(run_fixed_git_command(run.project_root, "git diff --stat")[1] or "(no working-tree diff reported by git diff --stat)"),
+        "",
+        "## Full Current Git Diff",
+        "",
+        fenced(cap_text(run_fixed_git_command(run.project_root, "git diff")[1] or "(empty diff)", DEEP_CONTEXT_CHAR_LIMIT)),
+        "",
+        "## Current Changed Files",
+        "",
+    ]
+    if changed:
+        lines.extend(f"- `{item}`" for item in changed)
+    else:
+        lines.append("- (no changed files reported by git status)")
+    lines.extend(["", "## Review-Relevant File Contents", ""])
+    if relevant_paths:
+        lines.append(read_context_files(root, relevant_paths))
+    else:
+        lines.append("(no bounded review-relevant files found)")
+    lines.extend(["", "## Raw Verification And Runner Evidence", ""])
+    for item in transcript.evidence:
+        if item.round != run.current_round:
+            continue
+        if item.kind in {"kimi_review_packet", "deep_context_file_contents"}:
+            continue
+        lines.extend(
+            [
+                f"### {item.kind} — `{item.status}`",
+                "",
+                f"Command: `{item.command or 'n/a'}`",
+                "",
+                fenced(excerpt(item.output, 20_000)),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Kimi Approval Gate Checklist",
+            "",
+            "- Verify the proposal against the actual diff and file contents above.",
+            "- Do not accept narrative claims without matching source, artifact, or raw command evidence.",
+            "- If approval is blocked only by missing evidence, name the exact evidence field or path that should be added.",
+            "- If all critical issues are resolved, return `REVIEW_STATUS: APPROVED` with advisory reservations separated from blockers.",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def kimi_review_packet_paths(transcript, changed_files: list[str]) -> list[str]:
+    paths: list[str] = []
+    paths.extend(changed_files)
+    for item in transcript.evidence:
+        if item.kind in {"deep_context_file_inventory", "user_session_context", "kimi_review_packet"}:
+            paths.extend(extract_context_file_paths(item.output))
+    for proposal in transcript.proposals[-2:]:
+        paths.extend(extract_context_file_paths(proposal.content))
+    for review in transcript.reviews[-2:]:
+        paths.extend(extract_context_file_paths(review.content))
+    root = Path(transcript.run.project_root)
+    return unique_preserve_order(path for path in paths if safe_context_file(root, path))[:DEEP_CONTEXT_FILE_LIMIT]
+
+
+def fenced(text: str) -> str:
+    return f"```text\n{text.strip() or '(empty)'}\n```"
 
 
 def summarize(text: str, limit: int = 220) -> str:

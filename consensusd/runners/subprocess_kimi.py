@@ -114,14 +114,20 @@ def _timeout_label(timeout_sec: int) -> str:
 
 def _review_context_instruction(evidence: list[Evidence]) -> str:
     kinds = {item.kind for item in evidence}
+    packet_instruction = (
+        "If `kimi_review_packet` is present, inspect it first as the round's approval packet: current proposal, prior critique, "
+        "diff, file contents, raw evidence, and approval checklist are meant to prevent avoidable evidence-request ping-pong. "
+    )
     if "user_session_context" in kinds and "objective_commit_diff" not in kinds:
         return (
+            packet_instruction +
             "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint, not as proof. "
             "Use it to understand the user's recent Ralph/reporting flow, then verify claims against the supplied bounded "
             "file contents and explicit evidence. Do not pull review scope from current git status, current HEAD, or "
             "unrelated cleanup/tooling commits unless those git facts are explicitly present in the evidence packet."
         )
     return (
+        packet_instruction +
         "Verify claims against the supplied repository evidence. If a specific fact is missing, mark it as missing evidence "
         "instead of widening scope implicitly."
     )
