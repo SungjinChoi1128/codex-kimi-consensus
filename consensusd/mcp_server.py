@@ -19,6 +19,8 @@ from .security import ConsensusTokenVerifier, assert_tool_allowed, bearer_token,
 from .settings import Settings
 from .state_machine import is_terminal
 
+SESSION_CONTEXT_CHAR_LIMIT = 12_000
+
 
 def runner_mode_note(runner_mode: str) -> str:
     if runner_mode == "mock":
@@ -26,6 +28,19 @@ def runner_mode_note(runner_mode: str) -> str:
     if runner_mode.endswith("-edit"):
         return "editable runner mode: Codex may apply scoped repo changes between Kimi review rounds"
     return ""
+
+
+def sanitize_session_context(session_context: Optional[str]) -> str:
+    if not session_context:
+        return ""
+    text = str(session_context).strip()
+    if not text:
+        return ""
+    if len(text) <= SESSION_CONTEXT_CHAR_LIMIT:
+        return text
+    return text[:SESSION_CONTEXT_CHAR_LIMIT].rstrip() + (
+        f"\n\n... truncated at {SESSION_CONTEXT_CHAR_LIMIT} characters by consensusd session context cap ..."
+    )
 
 
 class ConsensusService:
@@ -49,11 +64,13 @@ class ConsensusService:
         max_rounds: int = 5,
         lease_mode: str = "detached",
         lease_ttl_seconds: int = 90,
+        session_context: Optional[str] = None,
     ) -> dict[str, Any]:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
         if lease_mode not in {"detached", "attached"}:
             raise ValueError("lease_mode must be 'detached' or 'attached'")
+        session_context = sanitize_session_context(session_context)
         run = self.db.create_run(
             objective,
             project_root or str(self.settings.project_root),
@@ -63,6 +80,15 @@ class ConsensusService:
             lease_mode=lease_mode,
             lease_ttl_seconds=lease_ttl_seconds,
         )
+        if session_context:
+            self.db.add_evidence(
+                run.run_id,
+                1,
+                "user_session_context",
+                "OK",
+                session_context,
+                command="control_surface supplied session_context",
+            )
         if self.orchestrator:
             self.orchestrator.start_background()
         return {
@@ -71,6 +97,7 @@ class ConsensusService:
             "runner_mode": self.settings.runner_mode,
             "lease_mode": run.lease_mode,
             "lease_expires_at": run.lease_expires_at,
+            "session_context_recorded": bool(session_context),
             "watch": f"consensusd watch {run.run_id} --db {self.settings.db_path}",
             "note": runner_mode_note(self.settings.runner_mode),
         }
@@ -288,6 +315,7 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
         max_rounds: int = 5,
         lease_mode: str = "detached",
         lease_ttl_seconds: int = 90,
+        session_context: Optional[str] = None,
     ) -> dict[str, Any]:
         return call(
             "start_consensus_review",
@@ -298,6 +326,7 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
             max_rounds=max_rounds,
             lease_mode=lease_mode,
             lease_ttl_seconds=lease_ttl_seconds,
+            session_context=session_context,
         )
 
     @mcp.tool()

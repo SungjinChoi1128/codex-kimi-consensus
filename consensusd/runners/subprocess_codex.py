@@ -30,6 +30,8 @@ class SubprocessCodexRunner:
             "Quality bar: understand the last implementation deeply enough that Kimi can review the substance, not just metadata. "
             "Use the supplied deep context packet first: objective commit diff, current relevant files, P11B/Revolut artifacts, "
             "and package/test context. You may inspect a small number of additional repo files if a named uncertainty blocks the proposal. "
+            "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint such as a Ralph completion summary; "
+            "use it to find the relevant implementation thread, but reconcile it against git/file evidence before making claims. "
             "Do not run broad repo sweeps, unrelated tests, or implementation commands. If external API documentation is essential and "
             "your environment can browse, use official sources only and cite what you used; otherwise name the exact missing external fact "
             "instead of inventing it.\n"

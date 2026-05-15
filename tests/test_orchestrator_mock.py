@@ -361,6 +361,46 @@ def test_initial_repo_evidence_includes_head_when_no_objective_commit(tmp_path):
     assert "git_head_summary" in {kind for kind, _, _ in initial_git_evidence_commands("review current diff")}
 
 
+def test_session_context_without_commit_omits_git_evidence(tmp_path):
+    init_git_repo(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "revolut-p11b-collector.mjs").write_text("P11B collector context\n")
+    subprocess.run(["git", "add", "src/revolut-p11b-collector.mjs"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "p11b implementation"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (tmp_path / "cleanup.txt").write_text("unrelated dirty cleanup\n")
+    settings = Settings(db_path=tmp_path / "consensus.sqlite", project_root=tmp_path)
+    db = Database(settings.db_path)
+    db.init()
+    run = db.create_run("review the P11B implementation and plan the next step", str(tmp_path), "approval-gated", max_rounds=1)
+    db.add_evidence(
+        run.run_id,
+        1,
+        "user_session_context",
+        "OK",
+        "Ralph just completed P11B.1 and edited src/revolut-p11b-collector.mjs.",
+        command="control_surface supplied session_context",
+    )
+    orchestrator = Orchestrator(db, settings)
+
+    orchestrator.tick()
+
+    by_kind = {item.kind: item for item in db.list_evidence(run.run_id)}
+    assert "user_session_context" in by_kind
+    assert "context_scope_note" in by_kind
+    assert "git_status_short" not in by_kind
+    assert "git_diff_stat" not in by_kind
+    assert "git_head_summary" not in by_kind
+    assert "git_head_name_status" not in by_kind
+    assert "unrelated dirty cleanup" not in "\n".join(item.output for item in by_kind.values())
+    assert "P11B collector context" in by_kind["deep_context_file_contents"].output
+
+
 def test_deep_context_evidence_excludes_private_local_paths(tmp_path):
     init_git_repo(tmp_path)
     (tmp_path / ".env").write_text("SECRET=do-not-read\n")

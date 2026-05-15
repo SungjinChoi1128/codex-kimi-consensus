@@ -420,6 +420,7 @@ def review_command(
     runner_mode: str = "mock",
     show_transcript: bool = False,
     subprocess_timeout_sec: Optional[int] = None,
+    session_context: Optional[str] = None,
 ) -> None:
     """Run the whole approval-gated review loop in this process."""
     settings = _settings(db, project_root, runner_mode=runner_mode, subprocess_timeout_sec=subprocess_timeout_sec)
@@ -431,7 +432,13 @@ def review_command(
     run_id: str | None = None
     try:
         with orchestrator.exclusive():
-            result = service.tool_start_consensus_review(objective, str(project_root.resolve()), mode, max_rounds)
+            result = service.tool_start_consensus_review(
+                objective,
+                str(project_root.resolve()),
+                mode,
+                max_rounds,
+                session_context=session_context,
+            )
             run_id = result["run_id"]
             if not json_output:
                 print(f"Started consensus review: {run_id}")
@@ -526,6 +533,11 @@ if typer is not None:
             "--subprocess-timeout-sec",
             help="Timeout for real Codex/Kimi subprocess phases. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
+        session_context: Optional[str] = typer.Option(
+            None,
+            "--session-context",
+            help="Recent user/Codex session summary to pass as scoped review context.",
+        ),
     ) -> None:
         """Start the localhost daemon."""
         start_command(project_root, db, host, port, dev_auth_role, runner_mode, subprocess_timeout_sec)
@@ -585,6 +597,7 @@ if typer is not None:
             runner_mode,
             show_transcript,
             subprocess_timeout_sec,
+            session_context,
         )
 
     @app.command("status")
@@ -676,6 +689,7 @@ else:
         review_p.add_argument("--runner-mode", default="mock")
         review_p.add_argument("--show-transcript", action="store_true")
         review_p.add_argument("--subprocess-timeout-sec", type=int, default=None)
+        review_p.add_argument("--session-context", default=None)
 
         for name in ("status", "brief", "transcript", "approve", "cancel"):
             p = sub.add_parser(name)
@@ -729,6 +743,7 @@ else:
                 args.runner_mode,
                 args.show_transcript,
                 args.subprocess_timeout_sec,
+                args.session_context,
             )
         elif args.command == "status":
             status_command(args.run_id, args.db, args.json)

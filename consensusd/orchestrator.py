@@ -281,6 +281,23 @@ class Orchestrator:
         existing = self.db.list_evidence(run.run_id)
         if any(item.kind == "git_diff_stat" for item in existing):
             return
+        session_context_anchored = any(item.kind == "user_session_context" for item in existing) and not extract_commit_refs(run.objective)
+        if session_context_anchored:
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                "context_scope_note",
+                "OK",
+                (
+                    "This review is anchored to control-surface `user_session_context` because the objective did not name "
+                    "an explicit commit. consensusd intentionally omits git status, diff, and HEAD commit evidence from the "
+                    "agent prompt to avoid cross-session contamination. Bounded repo file context may still be supplied so "
+                    "Codex/Kimi can reconcile the session summary against actual files."
+                ),
+                command="consensusd session-context anchored scope",
+            )
+            self._record_deep_context_evidence(run)
+            return
         for kind, command, empty_message in initial_git_evidence_commands(run.objective):
             status, output = run_fixed_git_command(run.project_root, command)
             self.db.add_evidence(

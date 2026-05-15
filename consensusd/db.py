@@ -460,11 +460,22 @@ class Database:
         )
 
     def _append_event(self, conn: sqlite3.Connection, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        row = conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM events WHERE run_id = ?", (run_id,)).fetchone()
-        conn.execute(
-            "INSERT INTO events(event_id, run_id, sequence, event_type, payload_json, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-            (new_id("event"), run_id, int(row["next_sequence"]), event_type, json.dumps(payload, sort_keys=True), utcnow()),
-        )
+        payload_json = json.dumps(payload, sort_keys=True)
+        for _ in range(8):
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            try:
+                conn.execute(
+                    "INSERT INTO events(event_id, run_id, sequence, event_type, payload_json, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+                    (new_id("event"), run_id, int(row["next_sequence"]), event_type, payload_json, utcnow()),
+                )
+                return
+            except sqlite3.IntegrityError as exc:
+                if "events.run_id, events.sequence" not in str(exc):
+                    raise
+        raise ConcurrencyError(f"could not append event for {run_id} after sequence contention")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}

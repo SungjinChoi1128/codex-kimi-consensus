@@ -23,6 +23,8 @@ class SubprocessKimiRunner:
             "You are not the owner or editor of the implementation plan. Codex owns the plan markdown. "
             "Your job is to enrich the shared context, challenge weak assumptions, and provide advisory review material "
             "that Codex must adjudicate.\n"
+            "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint, not as proof. "
+            "Use it to understand the user's recent Ralph/reporting flow, then verify claims against git/file evidence.\n"
             "Return a critical, evidence-grounded architecture review at the level of an OMX/Kimi plan review.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"

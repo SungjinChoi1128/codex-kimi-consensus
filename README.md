@@ -133,10 +133,19 @@ Start a consensus review for the current diff. Objective: safely refactor the au
 Codex should call:
 
 ```text
-start_consensus_review(objective, project_root, mode="approval-gated", lease_mode="attached", lease_ttl_seconds=90)
+start_consensus_review(
+  objective,
+  project_root,
+  mode="approval-gated",
+  lease_mode="attached",
+  lease_ttl_seconds=90,
+  session_context="<recent Ralph/Codex summary when the user is referring to prior chat state>"
+)
 ```
 
-The tool returns a `run_id`, lease metadata, and a watch command. Attached leases are the Codex CLI UX guardrail: while Codex is actively waiting, `watch_consensus_progress(..., refresh_lease=true)` keeps the run alive. If the Codex chat/tool wait is interrupted and no heartbeat refresh arrives, consensusd cancels the run and terminates active Codex/Kimi subprocesses.
+The tool returns a `run_id`, lease metadata, whether session context was recorded, and a watch command. Attached leases are the Codex CLI UX guardrail: while Codex is actively waiting, `watch_consensus_progress(..., refresh_lease=true)` keeps the run alive. If the Codex chat/tool wait is interrupted and no heartbeat refresh arrives, consensusd cancels the run and terminates active Codex/Kimi subprocesses.
+
+Use `session_context` when the user says something like "review the P11B implementation" after a Ralph completion report or Codex summary. Keep it short and factual: recent artifact paths, commit ids, claimed safety outcomes, and the user's current ask. If `session_context` is present and the objective does not name a commit, consensusd treats the session context as the review anchor and intentionally omits git status, diff, and HEAD commit evidence from the agent prompt. It still supplies bounded relevant file contents when available so Codex/Kimi can check the summary against actual files.
 
 For user-facing progress, ask Codex for a brief. It should call:
 
@@ -153,7 +162,8 @@ uv --project /path/to/codex-kimi-consensus run consensusd review \
   "safely refactor the auth boundary; pause before Ralph handoff" \
   --project-root . \
   --db .consensusd/consensusd.sqlite \
-  --runner-mode codex-kimi-edit
+  --runner-mode codex-kimi-edit \
+  --session-context "Ralph just completed P11B.1; user asks to review that implementation and plan the next safest step."
 ```
 
 This creates the run, advances the local orchestrator, watches brief-driven progress, and prints a final brief plus Kimi/Codex negotiation summary. It does not dump the full transcript unless you add `--show-transcript`. `--runner-mode codex-kimi-edit` uses real `codex exec` for proposals, scoped revision passes, and OMX generation, plus real local Kimi CLI for architect review. `--runner-mode codex-kimi` is read-only: Codex plans and Kimi reviews, but Codex will not edit files between rounds. `--runner-mode codex` is a partial smoke that keeps Kimi deterministic.
@@ -192,7 +202,7 @@ export CONSENSUSD_SUBPROCESS_TIMEOUT_SEC=3600
 uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600
 ```
 
-Codex proposal prompts receive a bounded deep context packet before the subprocess starts: objective commit diff, relevant current files, P11B/Revolut artifacts, package/test context, and capped repo-local file contents. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
+Codex proposal prompts receive a bounded deep context packet before the subprocess starts: explicit objective commit diff when present, optional `user_session_context`, relevant P11B/Revolut artifacts, filtered package/test context, and capped repo-local file contents. If the objective names a commit, consensusd intentionally excludes unrelated current-HEAD commit metadata. If session context is present and no commit is named, consensusd omits git evidence entirely and uses the session context plus bounded relevant file contents. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
 
 ## Editable Mode Guardrails
 

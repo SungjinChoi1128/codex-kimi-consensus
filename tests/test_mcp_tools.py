@@ -373,6 +373,29 @@ def test_start_review_can_attach_lease_and_watch_refreshes_it(tmp_path):
     assert progress["lease_refreshed"] is True
 
 
+def test_start_review_records_control_surface_session_context(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    service.orchestrator = None
+    context = (
+        "Ralph just completed P11B.1 and reported guard/test artifacts. "
+        "User now asks to review the P11B implementation and plan the next safest step."
+    )
+
+    result = service.tool_start_consensus_review(
+        "review P11B implementation",
+        str(tmp_path),
+        session_context=context,
+    )
+
+    evidence = service.db.list_evidence(result["run_id"])
+    assert result["session_context_recorded"] is True
+    assert len(evidence) == 1
+    assert evidence[0].kind == "user_session_context"
+    assert evidence[0].command == "control_surface supplied session_context"
+    assert context in evidence[0].output
+
+
 def test_consensus_brief_includes_failed_run_error(tmp_path):
     settings, app = make_app(tmp_path)
     service = app.state.service
