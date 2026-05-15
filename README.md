@@ -188,7 +188,7 @@ export CONSENSUSD_SUBPROCESS_TIMEOUT_SEC=3600
 uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600
 ```
 
-Codex proposal and OMX prompts are intentionally bounded: they should use captured evidence first and record missing evidence instead of running broad scans until timeout.
+Codex proposal and OMX prompts are intentionally bounded: they should use captured evidence first and record missing evidence instead of running broad scans until timeout. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
 
 ## Editable Mode Guardrails
 

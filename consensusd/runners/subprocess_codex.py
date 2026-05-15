@@ -131,6 +131,9 @@ class SubprocessCodexRunner:
             output_path = Path(tmp) / "last-message.md"
             command = [
                 *self.settings.codex_command,
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--ephemeral",
                 "-C",
                 run.project_root,
                 "--sandbox",

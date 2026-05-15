@@ -110,5 +110,8 @@ def test_orchestrator_cancellation_kills_active_codex_subprocess(tmp_path):
     transcript = db.transcript(run.run_id)
     assert transcript.run.status == RunStatus.CANCELLED
     assert transcript.proposals == []
+    deadline = time.monotonic() + 2
+    while not terminated.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert terminated.read_text() == "terminated"
     assert any(event.event_type == "codex.proposal.cancelled" for event in transcript.events)
