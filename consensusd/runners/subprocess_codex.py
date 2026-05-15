@@ -22,21 +22,19 @@ class SubprocessCodexRunner:
 
     def generate_proposal(self, run: Run, prior_review: Optional[Review], evidence: list[Evidence]) -> str:
         prior = prior_review.content if prior_review else "(none)"
+        context_instruction = _proposal_context_instruction(evidence)
         prompt = (
             "You are Codex acting as implementation planner inside consensusd.\n"
             "This is a read-only planning/review pass. Do not edit files. Do not ask questions.\n"
             "Codex is the owner and editor of the implementation plan. Kimi is an advisory reviewer whose output "
             "enriches context and must be adjudicated, not blindly copied as the plan.\n"
             "Quality bar: understand the last implementation deeply enough that Kimi can review the substance, not just metadata. "
-            "Use the supplied deep context packet first: objective commit diff, current relevant files, P11B/Revolut artifacts, "
-            "and package/test context. You may inspect a small number of additional repo files if a named uncertainty blocks the proposal. "
-            "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint such as a Ralph completion summary; "
-            "use it to find the relevant implementation thread, but reconcile it against git/file evidence before making claims. "
+            f"{context_instruction} "
             "Do not run broad repo sweeps, unrelated tests, or implementation commands. If external API documentation is essential and "
             "your environment can browse, use official sources only and cite what you used; otherwise name the exact missing external fact "
             "instead of inventing it.\n"
-            "Take the time needed for a proper proposal within the runner timeout. Produce a concrete markdown proposal for the current "
-            "repository/diff at the level of an OMX adjudication artifact.\n\n"
+            "Take the time needed for a proper proposal within the runner timeout. Produce a concrete markdown proposal for the supplied "
+            "objective and evidence packet at the level of an OMX adjudication artifact.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"
             f"Round: {run.current_round}\n"
@@ -185,3 +183,21 @@ def _format_evidence(evidence: list[Evidence]) -> str:
             f"```text\n{item.output.strip() or '(empty)'}\n```"
         )
     return "\n\n".join(blocks)
+
+
+def _proposal_context_instruction(evidence: list[Evidence]) -> str:
+    kinds = {item.kind for item in evidence}
+    if "user_session_context" in kinds and "objective_commit_diff" not in kinds:
+        return (
+            "Use the supplied session-context packet first: user/Codex/Ralph completion summary, exact path inventory, "
+            "bounded file contents, P11B/Revolut artifacts, and package/test context. Treat session context as the "
+            "review anchor and reconcile claims against the supplied bounded file contents and explicit evidence only. "
+            "Do not infer scope from current git status, current HEAD, or unrelated cleanup/tooling commits unless those "
+            "git facts are explicitly present in the evidence packet. You may inspect a small number of additional named "
+            "repo files only if a specific uncertainty blocks the proposal."
+        )
+    return (
+        "Use the supplied deep context packet first: objective commit diff when provided, current relevant files, "
+        "P11B/Revolut artifacts, and package/test context. You may inspect a small number of additional repo files "
+        "if a named uncertainty blocks the proposal."
+    )

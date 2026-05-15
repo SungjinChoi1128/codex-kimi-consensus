@@ -17,14 +17,14 @@ class SubprocessKimiRunner:
         raise NotImplementedError("Kimi does not generate proposals")
 
     def review_proposal(self, run: Run, proposal: Proposal, evidence: list[Evidence]) -> ReviewDecision:
+        context_instruction = _review_context_instruction(evidence)
         prompt = (
             "You are Kimi acting as architect reviewer inside consensusd.\n"
             "Review the Codex proposal against the current repository objective. Do not edit files.\n"
             "You are not the owner or editor of the implementation plan. Codex owns the plan markdown. "
             "Your job is to enrich the shared context, challenge weak assumptions, and provide advisory review material "
             "that Codex must adjudicate.\n"
-            "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint, not as proof. "
-            "Use it to understand the user's recent Ralph/reporting flow, then verify claims against git/file evidence.\n"
+            f"{context_instruction}\n"
             "Return a critical, evidence-grounded architecture review at the level of an OMX/Kimi plan review.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"
@@ -103,3 +103,18 @@ def _format_evidence(evidence: list[Evidence]) -> str:
             f"```text\n{item.output.strip() or '(empty)'}\n```"
         )
     return "\n\n".join(blocks)
+
+
+def _review_context_instruction(evidence: list[Evidence]) -> str:
+    kinds = {item.kind for item in evidence}
+    if "user_session_context" in kinds and "objective_commit_diff" not in kinds:
+        return (
+            "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint, not as proof. "
+            "Use it to understand the user's recent Ralph/reporting flow, then verify claims against the supplied bounded "
+            "file contents and explicit evidence. Do not pull review scope from current git status, current HEAD, or "
+            "unrelated cleanup/tooling commits unless those git facts are explicitly present in the evidence packet."
+        )
+    return (
+        "Verify claims against the supplied repository evidence. If a specific fact is missing, mark it as missing evidence "
+        "instead of widening scope implicitly."
+    )
