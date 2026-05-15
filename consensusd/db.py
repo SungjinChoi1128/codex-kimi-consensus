@@ -346,6 +346,17 @@ class Database:
             self._append_event(conn, run_id, "ralph_handoff.created", handoff.model_dump(mode="json"))
         return handoff
 
+    def add_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> Event:
+        with self.connect() as conn:
+            self._append_event(conn, run_id, event_type, payload)
+            row = conn.execute(
+                "SELECT * FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("event append failed")
+            return self._event(row)
+
     def latest_proposal(self, run_id: str) -> Optional[Proposal]:
         with self.connect() as conn:
             row = conn.execute(

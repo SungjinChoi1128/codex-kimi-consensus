@@ -106,6 +106,37 @@ def _print_status(data: dict[str, object]) -> None:
         print(f"Note: {data['note']}")
 
 
+def _print_brief(data: dict[str, object]) -> None:
+    print(f"Run: {data['run_id']}")
+    print(f"Status: {data['status']}  phase={data['current_phase']}  round={data['round']}/{data['max_rounds']}")
+    print(f"Runner: {data['runner_mode']}")
+    if data.get("error"):
+        print(f"Error: {data['error']}")
+    print(f"Next: {data['next_action']}")
+    if data.get("last_kimi_status"):
+        print(f"\nKimi: {data['last_kimi_status']}")
+        print(_clip(str(data.get("last_kimi_summary") or ""), 900))
+    if data.get("revision_changed_files"):
+        print("\nCodex revision changed files")
+        for path in data["revision_changed_files"]:
+            print(f"- {path}")
+    if data.get("guardrail_violations"):
+        print("\nGuardrail violations")
+        for path in data["guardrail_violations"]:
+            print(f"- {path}")
+    if data.get("omx_plan_path"):
+        print(f"\nOMX plan: {data['omx_plan_path']}")
+    if data.get("context_bridge_path"):
+        print(f"Context bridge: {data['context_bridge_path']}")
+    events = data.get("phase_events") or []
+    if events:
+        print("\nRecent phases")
+        for event in events[-5:]:
+            payload = event.get("payload", {})
+            elapsed = f" elapsed={payload.get('elapsed_seconds')}s" if payload.get("elapsed_seconds") is not None else ""
+            print(f"- {event['event_type']} round={payload.get('round')}{elapsed}")
+
+
 def _clip(text: str, limit: int = 1800) -> str:
     if len(text) <= limit:
         return text
@@ -291,6 +322,12 @@ def status_command(run_id: str, db: Path = DEFAULT_DB, json_output: bool = False
     _print_json(data) if json_output else _print_status(data)
 
 
+def brief_command(run_id: str, db: Path = DEFAULT_DB, json_output: bool = False) -> None:
+    service, _ = _service(db, None)
+    data = service.tool_get_consensus_brief(run_id)
+    _print_json(data) if json_output else _print_brief(data)
+
+
 def watch_command(run_id: str, interval: float = 5.0, db: Path = DEFAULT_DB) -> None:
     service, _ = _service(db, None)
     last_status = None
@@ -439,6 +476,15 @@ if typer is not None:
     ) -> None:
         status_command(run_id, db, json_output)
 
+    @app.command("brief")
+    def typer_brief(
+        run_id: str,
+        db: Path = typer.Option(DEFAULT_DB, "--db"),
+        json_output: bool = typer.Option(False, "--json", help="Print raw JSON."),
+    ) -> None:
+        """Print a Codex-friendly progress brief."""
+        brief_command(run_id, db, json_output)
+
     @app.command("watch")
     def typer_watch(
         run_id: str,
@@ -506,11 +552,11 @@ else:
         review_p.add_argument("--json", action="store_true")
         review_p.add_argument("--runner-mode", default="mock")
 
-        for name in ("status", "transcript", "approve", "cancel"):
+        for name in ("status", "brief", "transcript", "approve", "cancel"):
             p = sub.add_parser(name)
             p.add_argument("run_id")
             p.add_argument("--db", type=Path, default=DEFAULT_DB)
-            if name in {"status", "transcript", "approve"}:
+            if name in {"status", "brief", "transcript", "approve"}:
                 p.add_argument("--json", action="store_true")
 
         watch_p = sub.add_parser("watch")
@@ -540,6 +586,8 @@ else:
             )
         elif args.command == "status":
             status_command(args.run_id, args.db, args.json)
+        elif args.command == "brief":
+            brief_command(args.run_id, args.db, args.json)
         elif args.command == "watch":
             watch_command(args.run_id, args.interval, args.db)
         elif args.command == "transcript":

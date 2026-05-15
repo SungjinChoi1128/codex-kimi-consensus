@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
 import re
 import subprocess
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional, TypeVar
 
 from .db import Database
 from .models import Proposal, ReviewStatus, Run, RunStatus
@@ -17,6 +19,8 @@ from .runners.subprocess_codex import SubprocessCodexRunner
 from .runners.subprocess_kimi import SubprocessKimiRunner
 from .settings import Settings
 from .state_machine import is_terminal
+
+T = TypeVar("T")
 
 
 def runner_name(runner: AgentRunner) -> str:
@@ -141,11 +145,20 @@ class Orchestrator:
             prior_review = self.db.latest_review(run.run_id)
             runner = self._codex_for(run)
             if prior_review and self._revision_enabled(run, runner):
-                revision = self._revision_runner(runner).apply_revision(
+                ensure_git_repo_for_editable(run.project_root)
+                before = repo_change_snapshot(run.project_root)
+                revision = self._run_with_phase_events(
                     run,
-                    prior_review,
-                    self.db.list_evidence(run.run_id),
+                    "codex.revision",
+                    runner,
+                    lambda: self._revision_runner(runner).apply_revision(
+                        run,
+                        prior_review,
+                        self.db.list_evidence(run.run_id),
+                    ),
                 )
+                after = repo_change_snapshot(run.project_root)
+                change_summary = summarize_editable_changes(before, after, self.settings)
                 self.db.add_evidence(
                     run.run_id,
                     run.current_round,
@@ -154,8 +167,24 @@ class Orchestrator:
                     revision,
                     command=runner_name(runner),
                 )
+                self.db.add_evidence(
+                    run.run_id,
+                    run.current_round,
+                    "editable_change_summary",
+                    "FAILED" if change_summary["violations"] else "OK",
+                    json.dumps(change_summary, indent=2, sort_keys=True),
+                    command="git status --porcelain + git diff",
+                )
+                self._phase_event(run, "codex.revision.audited", runner=runner_name(runner), **change_summary)
+                if change_summary["violations"]:
+                    raise RuntimeError(f"editable revision touched disallowed paths: {', '.join(change_summary['violations'])}")
                 self._record_repo_stat(run, "git_diff_stat_after_codex_revision")
-            content = runner.generate_proposal(run, prior_review, self.db.list_evidence(run.run_id))
+            content = self._run_with_phase_events(
+                run,
+                "codex.proposal",
+                runner,
+                lambda: runner.generate_proposal(run, prior_review, self.db.list_evidence(run.run_id)),
+            )
             self.db.add_proposal(run.run_id, run.current_round, content, runner=runner_name(runner))
             self._record_repo_stat(run, "git_diff_stat_before_kimi_review")
             latest = self.db.get_run(run.run_id)
@@ -167,7 +196,13 @@ class Orchestrator:
         if run.status == RunStatus.KIMI_REVIEWING:
             proposal = self.db.get_proposal(run.run_id, run.current_round)
             runner = self._kimi_for(run)
-            decision = runner.review_proposal(run, proposal, self.db.list_evidence(run.run_id))
+            decision = self._run_with_phase_events(
+                run,
+                "kimi.review",
+                runner,
+                lambda: runner.review_proposal(run, proposal, self.db.list_evidence(run.run_id)),
+            )
+            self._phase_event(run, "kimi.review.verdict", runner=runner_name(runner), review_status=decision.status.value)
             self.db.add_review(run.run_id, run.current_round, decision.status, decision.content, runner=runner_name(runner))
             latest = self.db.get_run(run.run_id)
             if decision.status == ReviewStatus.APPROVED:
@@ -195,8 +230,14 @@ class Orchestrator:
             if not proposal:
                 raise RuntimeError("cannot generate OMX without a proposal")
             runner = self._codex_for(run)
-            content = runner.generate_omx(run, proposal, self.db.list_evidence(run.run_id))
+            content = self._run_with_phase_events(
+                run,
+                "codex.omx",
+                runner,
+                lambda: runner.generate_omx(run, proposal, self.db.list_evidence(run.run_id)),
+            )
             plan_path = self._write_omx_plan(run, content)
+            self._phase_event(run, "codex.omx.written", runner=runner_name(runner), path=plan_path)
             self.db.add_omx_plan(run.run_id, content, runner=runner_name(runner), path=plan_path)
             latest = self.db.get_run(run.run_id)
             self.db.transition_run(run.run_id, RunStatus.OMX_GENERATED, expected_version=latest.version)
@@ -248,6 +289,56 @@ class Orchestrator:
 
     def _revision_runner(self, runner: AgentRunner) -> RevisionRunner:
         return runner  # type: ignore[return-value]
+
+    def _phase_event(self, run: Run, event_type: str, **payload) -> None:
+        self.db.add_event(
+            run.run_id,
+            event_type,
+            {
+                "round": run.current_round,
+                "status": run.status.value,
+                **payload,
+            },
+        )
+
+    def _run_with_phase_events(self, run: Run, event_prefix: str, runner: AgentRunner, call: Callable[[], T]) -> T:
+        started = time.monotonic()
+        label = runner_name(runner)
+        self._phase_event(run, f"{event_prefix}.started", runner=label)
+        result: list[T] = []
+        errors: list[BaseException] = []
+
+        def target() -> None:
+            try:
+                result.append(call())
+            except BaseException as exc:  # noqa: BLE001 - re-raised after heartbeat loop
+                errors.append(exc)
+
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        heartbeats = 0
+        interval = self.settings.heartbeat_interval_sec
+        if interval <= 0:
+            worker.join()
+            interval = 0
+        while worker.is_alive():
+            worker.join(timeout=interval)
+            if worker.is_alive():
+                heartbeats += 1
+                self._phase_event(
+                    run,
+                    f"{event_prefix}.heartbeat",
+                    runner=label,
+                    elapsed_seconds=round(time.monotonic() - started, 3),
+                    heartbeat=heartbeats,
+                )
+
+        elapsed = round(time.monotonic() - started, 3)
+        if errors:
+            self._phase_event(run, f"{event_prefix}.failed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+            raise errors[0]
+        self._phase_event(run, f"{event_prefix}.completed", runner=label, elapsed_seconds=elapsed, heartbeats=heartbeats)
+        return result[0]
 
     def _ensure_context_bridge(self, run: Run) -> None:
         transcript = self.db.transcript(run.run_id)
@@ -397,6 +488,142 @@ def markdown_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def repo_change_snapshot(project_root: str) -> dict[str, str]:
+    if not is_git_repo(project_root):
+        return {}
+    files = git_changed_files(project_root)
+    return {file: git_diff_hash(project_root, file) for file in files}
+
+
+def summarize_editable_changes(before: dict[str, str], after: dict[str, str], settings: Settings) -> dict[str, object]:
+    changed_files = sorted(after)
+    revision_changed_files = sorted(file for file in set(before) | set(after) if before.get(file) != after.get(file))
+    violations = [file for file in revision_changed_files if editable_path_violation(file, settings)]
+    return {
+        "changed_files": changed_files,
+        "revision_changed_files": revision_changed_files,
+        "violations": violations,
+        "allowed_paths": list(settings.editable_allowed_paths),
+        "denied_paths": list(settings.editable_denied_paths),
+    }
+
+
+def editable_path_violation(path: str, settings: Settings) -> bool:
+    normalized = path.replace("\\", "/").lstrip("/")
+    denied = tuple(item.replace("\\", "/").lstrip("/") for item in settings.editable_denied_paths)
+    if any(path_matches_rule(normalized, item) for item in denied):
+        return True
+    allowed = tuple(item.replace("\\", "/").lstrip("/") for item in settings.editable_allowed_paths)
+    if allowed and not any(path_matches_rule(normalized, item) for item in allowed):
+        return True
+    return False
+
+
+def path_matches_rule(path: str, rule: str) -> bool:
+    rule = rule.lstrip("/")
+    if not rule:
+        return False
+    if rule.endswith("/"):
+        prefix = rule
+        return path == prefix.rstrip("/") or path.startswith(prefix)
+    if rule.endswith("."):
+        return path.startswith(rule)
+    return path == rule
+
+
+def git_changed_files(project_root: str) -> list[str]:
+    if not is_git_repo(project_root):
+        return []
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=Path(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    files: list[str] = []
+    entries = [item for item in result.stdout.split("\0") if item]
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        status = entry[:2]
+        path = entry[3:]
+        if path:
+            files.append(path)
+        index += 2 if status[0] in {"R", "C"} or status[1] in {"R", "C"} else 1
+    return sorted(set(files))
+
+
+def is_git_repo(project_root: str) -> bool:
+    root = Path(project_root)
+    if not root.exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def ensure_git_repo_for_editable(project_root: str) -> None:
+    root = Path(project_root)
+    if not root.exists():
+        raise RuntimeError(f"editable mode requires an existing git worktree: {root}")
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("editable mode requires git to be installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"editable mode git preflight timed out for {root}") from exc
+    except subprocess.SubprocessError as exc:
+        raise RuntimeError(f"editable mode git preflight failed for {root}: {exc}") from exc
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        details = (result.stderr or result.stdout or "").strip()
+        suffix = f": {details}" if details else ""
+        raise RuntimeError(f"editable mode requires a git worktree at {root}{suffix}")
+
+
+def git_diff_hash(project_root: str, path: str) -> str:
+    result = subprocess.run(
+        ["git", "diff", "--", path],
+        cwd=Path(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.stdout:
+        payload = result.stdout
+    else:
+        full_path = Path(project_root) / path
+        if full_path.is_file():
+            payload = full_path.read_text(errors="replace")
+        elif full_path.is_dir():
+            parts = []
+            for child in sorted(item for item in full_path.rglob("*") if item.is_file()):
+                rel = child.relative_to(full_path).as_posix()
+                parts.append(f"{rel}:{hashlib.sha256(child.read_bytes()).hexdigest()}")
+            payload = "\n".join(parts)
+        else:
+            payload = ""
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
     allowed = {
         "git diff --stat": ["git", "diff", "--stat"],
@@ -404,6 +631,8 @@ def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
     }
     if command not in allowed:
         raise ValueError("unsupported fixed verification command")
+    if not is_git_repo(project_root):
+        return "FAILED", f"not a git repository: {Path(project_root)}"
     result = subprocess.run(
         allowed[command],
         cwd=Path(project_root),

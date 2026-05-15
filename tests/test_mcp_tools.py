@@ -9,8 +9,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from starlette.testclient import TestClient
 
-from consensusd.mcp_server import create_app
-from consensusd.models import RunStatus
+from consensusd.mcp_server import create_app, next_action
+from consensusd.models import ReviewStatus, RunStatus
 from consensusd.settings import Settings
 
 
@@ -150,6 +150,7 @@ async def test_mcp_lists_consensus_tools(tmp_path):
 
     names = {tool.name for tool in tools.tools}
     assert "start_consensus_review" in names
+    assert "get_consensus_brief" in names
     assert "approve_ralph_handoff" in names
 
 
@@ -241,6 +242,17 @@ def test_verification_tools_use_fixed_git_commands(tmp_path):
     assert "files" in files
 
 
+def test_verification_tools_return_concise_non_git_error(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
+
+    diff = service.tool_get_git_diff(run.run_id)
+
+    assert diff["status"] == "FAILED"
+    assert diff["output"] == f"not a git repository: {tmp_path}"
+
+
 def test_record_evidence_rejects_arbitrary_command(tmp_path):
     settings, app = make_app(tmp_path)
     service = app.state.service
@@ -252,3 +264,49 @@ def test_record_evidence_rejects_arbitrary_command(tmp_path):
         assert "fixed git command" in str(exc)
     else:
         raise AssertionError("arbitrary evidence command accepted")
+
+
+def test_consensus_brief_summarizes_run_for_codex(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
+    service.db.add_event(run.run_id, "codex.proposal.started", {"round": 1})
+    service.db.add_proposal(run.run_id, 1, "Codex proposal content")
+    service.db.add_review(run.run_id, 1, ReviewStatus.NEEDS_REVISION, "Kimi wants stronger evidence")
+    service.db.add_omx_plan(run.run_id, "plan", path="/tmp/plan.md")
+    service.db.add_context_bridge(run.run_id, "/tmp/bridge.md", "bridge")
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["run_id"] == run.run_id
+    assert brief["error"] is None
+    assert brief["current_phase"] == "codex.proposal.started"
+    assert brief["latest_phase_event"]["event_type"] == "codex.proposal.started"
+    assert brief["last_kimi_status"] == "NEEDS_REVISION"
+    assert "Kimi wants" in brief["last_kimi_summary"]
+    assert brief["omx_plan_path"] == "/tmp/plan.md"
+    assert brief["context_bridge_path"] == "/tmp/bridge.md"
+    assert brief["artifact_counts"]["context_bridges"] == 1
+
+
+def test_consensus_brief_includes_failed_run_error(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("review diff", str(tmp_path), "approval-gated")
+    service.db.transition_run(run.run_id, RunStatus.FAILED, expected_version=run.version, error="guardrail failed")
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["status"] == RunStatus.FAILED.value
+    assert brief["error"] == "guardrail failed"
+
+
+def test_next_action_does_not_use_stale_kimi_revision_during_review():
+    assert (
+        next_action(RunStatus.KIMI_REVIEWING.value, ReviewStatus.NEEDS_REVISION.value)
+        == "Wait for Kimi's architect review."
+    )
+    assert (
+        next_action(RunStatus.CODEX_DRAFTING.value, ReviewStatus.NEEDS_REVISION.value)
+        == "Codex is preparing a revised proposal for Kimi."
+    )

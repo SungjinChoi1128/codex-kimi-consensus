@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -70,6 +71,9 @@ class ConsensusService:
         if run.runner_mode == "mock":
             result["note"] = runner_mode_note(run.runner_mode)
         return result
+
+    def tool_get_consensus_brief(self, run_id: str) -> dict[str, Any]:
+        return build_consensus_brief(self.db.transcript(run_id))
 
     def tool_get_consensus_transcript(self, run_id: str) -> dict[str, Any]:
         result = self.db.transcript(run_id).model_dump(mode="json")
@@ -221,6 +225,10 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
         return call("get_consensus_status", ctx, run_id=run_id)
 
     @mcp.tool()
+    def get_consensus_brief(run_id: str, ctx: Context) -> dict[str, Any]:
+        return call("get_consensus_brief", ctx, run_id=run_id)
+
+    @mcp.tool()
     def get_consensus_transcript(run_id: str, ctx: Context) -> dict[str, Any]:
         return call("get_consensus_transcript", ctx, run_id=run_id)
 
@@ -319,6 +327,102 @@ def create_app(settings: Optional[Settings] = None, start_worker: bool = True):
     app.state.orchestrator = orchestrator
     app.state.settings = settings
     return app
+
+
+def build_consensus_brief(transcript) -> dict[str, Any]:
+    run = transcript.run
+    latest_review = transcript.reviews[-1] if transcript.reviews else None
+    latest_proposal = transcript.proposals[-1] if transcript.proposals else None
+    latest_plan = transcript.omx_plans[-1] if transcript.omx_plans else None
+    latest_bridge = transcript.context_bridges[-1] if transcript.context_bridges else None
+    latest_change = latest_evidence(transcript.evidence, "editable_change_summary")
+    change_summary = parse_json(latest_change.output) if latest_change else {}
+    phase_events = [
+        {
+            "sequence": event.sequence,
+            "event_type": event.event_type,
+            "payload": parse_json(event.payload_json),
+            "created_at": event.created_at,
+        }
+        for event in transcript.events
+        if event.event_type.startswith(("codex.", "kimi."))
+    ]
+    return {
+        "run_id": run.run_id,
+        "status": run.status.value,
+        "error": run.error,
+        "runner_mode": run.runner_mode,
+        "round": run.current_round,
+        "max_rounds": run.max_rounds,
+        "objective": run.objective,
+        "project_root": run.project_root,
+        "current_phase": current_phase(run.status.value, phase_events),
+        "latest_phase_event": phase_events[-1] if phase_events else None,
+        "last_kimi_status": latest_review.status.value if latest_review else None,
+        "last_kimi_summary": summarize_text(latest_review.content, 600) if latest_review else None,
+        "last_codex_summary": summarize_text(latest_proposal.content, 600) if latest_proposal else None,
+        "revision_changed_files": change_summary.get("revision_changed_files", []),
+        "changed_files": change_summary.get("changed_files", []),
+        "guardrail_violations": change_summary.get("violations", []),
+        "omx_plan_path": latest_plan.path if latest_plan else None,
+        "context_bridge_path": latest_bridge.path if latest_bridge else None,
+        "next_action": next_action(run.status.value, latest_review.status.value if latest_review else None),
+        "phase_events": phase_events[-10:],
+        "artifact_counts": {
+            "proposals": len(transcript.proposals),
+            "reviews": len(transcript.reviews),
+            "evidence": len(transcript.evidence),
+            "omx_plans": len(transcript.omx_plans),
+            "context_bridges": len(transcript.context_bridges),
+        },
+    }
+
+
+def latest_evidence(evidence, kind: str):
+    matches = [item for item in evidence if item.kind == kind]
+    return matches[-1] if matches else None
+
+
+def parse_json(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def summarize_text(text: str, limit: int) -> str:
+    compact = " ".join(text.strip().split())
+    return compact[:limit].rstrip() + ("..." if len(compact) > limit else "")
+
+
+def current_phase(status: str, phase_events: list[dict[str, Any]]) -> str:
+    if phase_events and phase_events[-1]["event_type"].endswith(".started"):
+        return phase_events[-1]["event_type"]
+    return status
+
+
+def next_action(status: str, last_kimi_status: Optional[str]) -> str:
+    if status == RunStatus.AWAITING_HUMAN_APPROVAL.value:
+        return "Review the OMX plan and approve Ralph handoff when ready."
+    if status == RunStatus.FAILED.value:
+        return "Inspect the latest Kimi review, editable change summary, and error before restarting."
+    if status == RunStatus.REVISION_REQUESTED.value:
+        return "Codex should revise the repo or proposal, then request Kimi re-review."
+    if last_kimi_status == ReviewStatus.NEEDS_REVISION.value and status in {
+        RunStatus.AWAITING_CODEX_PROPOSAL.value,
+        RunStatus.CODEX_DRAFTING.value,
+    }:
+        return "Codex is preparing a revised proposal for Kimi."
+    if status in {RunStatus.AWAITING_KIMI_REVIEW.value, RunStatus.KIMI_REVIEWING.value}:
+        return "Wait for Kimi's architect review."
+    if status in {RunStatus.CONSENSUS_LOCKED.value, RunStatus.AWAITING_OMX.value, RunStatus.OMX_GENERATING.value}:
+        return "Wait for Codex to generate the OMX plan."
+    if status == RunStatus.OMX_GENERATED.value:
+        return "Wait for the approval gate to open."
+    if status == RunStatus.RALPH_HANDOFF_COMPLETE.value:
+        return "No action required; Ralph handoff is complete."
+    return "Wait for the orchestrator to advance the current phase."
 
 
 def create_legacy_app(settings: Optional[Settings] = None, start_worker: bool = True) -> FastAPI:

@@ -14,6 +14,7 @@ TOOL_PERMISSIONS: dict[ToolRole, set[str]] = {
     ToolRole.CONTROL_SURFACE: {
         "start_consensus_review",
         "get_consensus_status",
+        "get_consensus_brief",
         "get_consensus_transcript",
         "cancel_consensus_review",
         "approve_ralph_handoff",
