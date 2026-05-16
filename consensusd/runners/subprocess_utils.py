@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import re
 import signal
 import subprocess
 import threading
@@ -22,6 +24,9 @@ class CommandResult:
     live_log_path: str | None = None
 
 
+UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
 def phase_artifact_dir(project_root: str | Path, run_id: str) -> Path:
     return Path(project_root) / ".consensusd" / "logs" / "runs" / run_id
 
@@ -34,6 +39,58 @@ def phase_artifact_paths(project_root: str | Path, run_id: str, phase: str, roun
         "live_log": directory / f"{stem}.live.log",
         "last_message": directory / f"{stem}.last-message.md",
     }
+
+
+def extract_codex_thread_id(text: str) -> str | None:
+    """Extract a resumable Codex thread id from `codex exec --json` output."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        found = _find_json_key(event, "thread_id")
+        if isinstance(found, str) and re.fullmatch(UUID_RE, found):
+            return found
+    match = re.search(rf'"thread_id"\s*:\s*"({UUID_RE})"', text)
+    return match.group(1) if match else None
+
+
+def extract_kimi_session_id(text: str) -> str | None:
+    """Extract the Kimi `-r` resume id printed by the CLI."""
+    match = re.search(rf"To resume this session:\s*kimi\s+-r\s+({UUID_RE})", text)
+    if match:
+        return match.group(1)
+    match = re.search(rf"(?:--session|--resume|-S|-r)\s+({UUID_RE})", text)
+    return match.group(1) if match else None
+
+
+def combined_result_text(result: CommandResult) -> str:
+    parts = [result.stdout or "", result.stderr or ""]
+    if result.live_log_path:
+        try:
+            parts.append(Path(result.live_log_path).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return "\n".join(parts)
+
+
+def _find_json_key(value, key: str):
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _find_json_key(item, key)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_json_key(item, key)
+            if found is not None:
+                return found
+    return None
 
 
 def run_cancellable_command(

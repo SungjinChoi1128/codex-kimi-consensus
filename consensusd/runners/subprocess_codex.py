@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from typing import Optional
 
+from consensusd.db import Database
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, Run
-from consensusd.runners.subprocess_utils import phase_artifact_paths, run_cancellable_command
+from consensusd.runners.subprocess_utils import (
+    combined_result_text,
+    extract_codex_thread_id,
+    phase_artifact_paths,
+    run_cancellable_command,
+)
 from consensusd.settings import Settings
+
+CODEX_SESSION_ROLE = "codex_planner"
+CODEX_EDIT_SESSION_ROLE = "codex_planner_edit"
 
 
 class SubprocessCodexRunner:
@@ -14,9 +23,10 @@ class SubprocessCodexRunner:
     tests or expose shell access to agents.
     """
 
-    def __init__(self, settings: Settings, editable: bool = False):
+    def __init__(self, settings: Settings, editable: bool = False, db: Optional[Database] = None):
         self.settings = settings
         self.editable = editable
+        self.db = db
 
     def generate_proposal(self, run: Run, prior_review: Optional[Review], evidence: list[Evidence]) -> str:
         prior = prior_review.content if prior_review else "(none)"
@@ -32,14 +42,26 @@ class SubprocessCodexRunner:
             "your environment can browse, use official sources only and cite what you used; otherwise name the exact missing external fact "
             "instead of inventing it.\n"
             "Take the time needed for a proper proposal within the runner timeout. Produce a concrete markdown proposal for the supplied "
-            "objective and evidence packet at the level of an OMX adjudication artifact.\n\n"
+            "objective and evidence packet at the level of an OMX adjudication artifact. Round 1 is not allowed to be a thin intent note: "
+            "it must include a first-class draft PRD and draft test spec that Kimi can review directly. Later rounds must revise those "
+            "draft sections in response to Kimi, not defer PRD/test-spec creation to the final OMX phase.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"
             f"Round: {run.current_round}\n"
             f"Project root: {run.project_root}\n\n"
             f"Prior Kimi review:\n{prior}\n\n"
             f"Evidence:\n{_format_evidence(evidence)}\n\n"
-            "Return only markdown using this structure:\n"
+            "Return only markdown using this structure, including the exact draft markers:\n"
+            "<!-- CONSENSUSD:DRAFT_PRD_START -->\n"
+            "# Draft PRD - <short title>\n"
+            "Include problem, goals, non-goals, owner workflow, requirements, acceptance criteria, risks, rollout/rollback notes, "
+            "and explicit READY/BLOCKED implications.\n"
+            "<!-- CONSENSUSD:DRAFT_PRD_END -->\n\n"
+            "<!-- CONSENSUSD:DRAFT_TEST_SPEC_START -->\n"
+            "# Draft Test Spec - <short title>\n"
+            "Include test matrix, negative tests, exact commands, fixtures/data needs, evidence capture, pass/fail gates, "
+            "and known missing evidence.\n"
+            "<!-- CONSENSUSD:DRAFT_TEST_SPEC_END -->\n\n"
             "## Proposal\n"
             "Explain the proposed decision or implementation direction.\n\n"
             "## Evidence Reviewed\n"
@@ -60,7 +82,8 @@ class SubprocessCodexRunner:
             "Exact commands/artifacts expected before approval.\n\n"
             "## Safety And Governance Notes\n"
             "Approval gates, non-goals, and forbidden actions.\n\n"
-            "If Kimi previously requested revision, do not merely restate the plan; explicitly adjudicate each objection."
+            "If Kimi previously requested revision, do not merely restate the plan; explicitly adjudicate each objection and update "
+            "the draft PRD/test spec sections so Kimi reviews the concrete revised artifacts."
         )
         return self._run_codex(run, prompt, "proposal")
 
@@ -111,8 +134,24 @@ class SubprocessCodexRunner:
             f"Project root: {run.project_root}\n\n"
             f"Consensus proposal:\n{consensus_proposal.content}\n\n"
             f"Evidence:\n{_format_evidence(evidence)}\n\n"
-            "Return only markdown. Include:\n"
+            "The `context_bridge` evidence is the authoritative Kimi/Codex negotiation summary for this final plan. "
+            "Do not say Kimi review is unavailable if the bridge or review evidence is present; adjudicate it directly.\n\n"
+            "If the consensus proposal contains `CONSENSUSD:DRAFT_PRD_*` and `CONSENSUSD:DRAFT_TEST_SPEC_*` sections, "
+            "promote the latest accepted drafts into the final PRD and test-spec markers below, applying Kimi adjudications "
+            "from the context bridge. The final phase should package and polish reviewed drafts, not invent a new plan.\n\n"
+            "Return only markdown. The markdown must contain all three artifact sections using these exact markers:\n"
+            "<!-- CONSENSUSD:PRD_START -->\n"
+            "# PRD - <short title>\n"
+            "...proper product requirements...\n"
+            "<!-- CONSENSUSD:PRD_END -->\n\n"
+            "<!-- CONSENSUSD:TEST_SPEC_START -->\n"
+            "# Test Spec - <short title>\n"
+            "...proper verification strategy, test cases, commands, and acceptance gates...\n"
+            "<!-- CONSENSUSD:TEST_SPEC_END -->\n\n"
+            "Then include the full OMX plan body. Include:\n"
             "- a Codex-owned implementation plan; Codex remains the editor/owner of the plan markdown\n"
+            "- a proper PRD section with problem, goals, non-goals, user/owner workflow, requirements, acceptance criteria, risks, and rollout/rollback notes\n"
+            "- a proper test spec section with test matrix, negative tests, command list, fixtures/data needs, evidence capture, and pass/fail gates\n"
             "- a context enrichment bridge section summarizing Kimi's advisory review cycle separately from the plan body\n"
             "- an adjudication table mapping reviewer items to decisions and status\n"
             "- key design decisions now locked in\n"
@@ -121,8 +160,13 @@ class SubprocessCodexRunner:
             "- implementation steps\n"
             "- safety/security constraints\n"
             "- verification commands\n"
+            "- Ralph Handoff Decision with exactly one of `Decision: READY` or `Decision: BLOCKED`\n"
             "- approval gate before Ralph handoff\n"
             "- known residual risks\n"
+            "\nIf the consensus only locks acceptance criteria, says no implementation is authorized, or records unresolved "
+            "critical issues, set `Decision: BLOCKED` and write a concrete next engineering prompt instead of implying "
+            "Ralph should execute the plan. If `Decision: READY`, the implementation steps must be specific enough for "
+            "Ralph to edit files and verify them without inventing scope.\n"
             "\nMatch the depth and structure of an OMX plan review bridge, but do not present Kimi as co-author or plan owner. "
             "Kimi enriches context; Codex adjudicates and owns the final plan."
         )
@@ -134,23 +178,14 @@ class SubprocessCodexRunner:
         output_path = paths["last_message"]
         live_log_path = paths["live_log"]
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        command = [
-            *self.settings.codex_command,
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--ephemeral",
-            "-C",
-            run.project_root,
-            "--sandbox",
-            sandbox,
-            "--output-last-message",
-            str(output_path),
-            prompt,
-        ]
+        session_role = CODEX_EDIT_SESSION_ROLE if phase == "revision" else CODEX_SESSION_ROLE
+        session_id = self.db.get_runner_session(run.run_id, session_role) if self.db else None
+        command = self._codex_command(run, prompt, output_path, sandbox, session_id)
+        resume_note = f" resume_session={session_id}" if session_id else ""
         print(
             f"[consensusd] run={run.run_id} phase=codex.{phase} starting "
             f"timeout={_timeout_label(self.settings.subprocess_timeout_sec)} "
-            f"output={output_path} live_log={live_log_path}",
+            f"output={output_path} live_log={live_log_path}{resume_note}",
             flush=True,
         )
         result = run_cancellable_command(
@@ -165,6 +200,7 @@ class SubprocessCodexRunner:
             f"pid={result.pid} returncode={result.returncode} live_log={result.live_log_path}",
             flush=True,
         )
+        self._record_session(run, result, phase, session_role)
         output = output_path.read_text() if output_path.exists() else result.stdout
         if result.returncode != 0:
             details = (result.stderr or result.stdout or "").strip()
@@ -173,6 +209,53 @@ class SubprocessCodexRunner:
         if not output:
             raise RuntimeError(f"codex subprocess returned empty output during {phase}")
         return output
+
+    def _codex_command(self, run: Run, prompt: str, output_path, sandbox: str, session_id: Optional[str]) -> list[str]:
+        if session_id:
+            # `codex exec resume` reuses the persisted session's working root and
+            # sandbox. Keep this for read-only planning continuity; editable
+            # revision passes use a separate session role created with
+            # workspace-write.
+            return [
+                *self.settings.codex_command,
+                "resume",
+                session_id,
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--json",
+                "--output-last-message",
+                str(output_path),
+                prompt,
+            ]
+        return [
+            *self.settings.codex_command,
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-C",
+            run.project_root,
+            "--sandbox",
+            sandbox,
+            "--json",
+            "--output-last-message",
+            str(output_path),
+            prompt,
+        ]
+
+    def _record_session(self, run: Run, result, phase: str, role: str) -> None:
+        if not self.db:
+            return
+        session_id = extract_codex_thread_id(combined_result_text(result))
+        if not session_id:
+            return
+        self.db.upsert_runner_session(
+            run.run_id,
+            role,
+            session_id,
+            source="codex exec --json thread_id",
+            phase=f"codex.{phase}",
+            round=run.current_round,
+            event_type="codex.session.updated",
+        )
 
 
 def _format_evidence(evidence: list[Evidence]) -> str:
@@ -201,12 +284,14 @@ def _proposal_context_instruction(evidence: list[Evidence]) -> str:
             "review anchor and reconcile claims against the supplied bounded file contents and explicit evidence only. "
             "Do not infer scope from current git status, current HEAD, or unrelated cleanup/tooling commits unless those "
             "git facts are explicitly present in the evidence packet. You may inspect a small number of additional named "
-            "repo files only if a specific uncertainty blocks the proposal. Treat approval evidence as present-tense proof, "
-            "not as a future promise to gather proof after Kimi asks for it."
+            "repo files only if a specific uncertainty blocks the proposal. If `context_quality_profile` is present, "
+            "treat any `quality_failures` as review blockers or explicit missing-evidence risks. Treat approval evidence "
+            "as present-tense proof, not as a future promise to gather proof after Kimi asks for it."
         )
     return (
         "Use the supplied deep context packet first: objective commit diff when provided, current relevant files, "
         "P11B/Revolut artifacts, and package/test context. You may inspect a small number of additional repo files "
-        "if a named uncertainty blocks the proposal. Treat approval evidence as present-tense proof, not as a future "
-        "promise to gather proof after Kimi asks for it."
+        "if a named uncertainty blocks the proposal. If `context_quality_profile` is present, treat any "
+        "`quality_failures` as review blockers or explicit missing-evidence risks. Treat approval evidence as "
+        "present-tense proof, not as a future promise to gather proof after Kimi asks for it."
     )

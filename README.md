@@ -7,6 +7,8 @@
 - Codex CLI calls local MCP tools exposed by `consensusd`.
 - `consensusd` runs a durable SQLite state machine and append-only event log.
 - Mock or subprocess Codex/Kimi runners negotiate until consensus is locked.
+- Real subprocess runners persist and resume their own CLI sessions across rounds when the CLI exposes a resume id. SQLite still remains the durable source of truth, but Codex/Kimi do not have to psychologically restart from a blank chat every round.
+- Codex round 1 produces a concrete draft PRD and draft test spec inside the proposal, and consensusd writes those drafts before Kimi review. Kimi reviews the draft artifacts directly instead of asking for them after the fact.
 - In editable e2e mode, Codex applies scoped repo revisions between Kimi review rounds and records the revision as durable evidence.
 - Phase and heartbeat events are appended for proposal, review, revision, and OMX generation so Codex can show progress without dumping the whole transcript.
 - Before each Kimi review, consensusd writes a bounded Kimi evidence packet with the current proposal, diff, relevant file contents, raw evidence, and approval checklist.
@@ -154,7 +156,7 @@ For user-facing progress, ask Codex for a brief. It should call:
 get_consensus_brief(run_id)
 ```
 
-The brief includes the current phase, latest Kimi verdict, Codex revision files, guardrail violations, OMX/context bridge paths, and the next action. When a run reaches `AWAITING_HUMAN_APPROVAL`, it also includes `ralph_handoff_prompt`, which is the user-facing text to paste into Codex CLI to start Ralph with the approved plan and context bridge.
+The brief includes the current phase, latest Kimi verdict, Codex revision files, guardrail violations, PRD/test-spec/OMX/context-bridge paths, Ralph handoff readiness, and the next action. When a run reaches `AWAITING_HUMAN_APPROVAL`, it includes `ralph_handoff_prompt` only if the generated plan is actually ready for Ralph. If the plan says `Decision: BLOCKED`, acceptance-criteria-only, no implementation authorized, mock output, or unresolved numbered critical issues, the brief shows blockers and a narrowing guide instead of a misleading `$ralph` prompt.
 
 If the MCP server is not already connected in the current Codex session, Codex can run the whole approval-gated flow as a local command without a server terminal:
 
@@ -167,7 +169,7 @@ uv --project /path/to/codex-kimi-consensus run consensusd review \
   --session-context "Ralph just completed P11B.1; user asks to review that implementation and plan the next safest step."
 ```
 
-This creates the run, advances the local orchestrator, watches brief-driven progress, and prints a final brief plus Kimi/Codex negotiation summary. It does not dump the full transcript unless you add `--show-transcript`. `--runner-mode codex-kimi-edit` uses real `codex exec` for proposals, scoped revision passes, and OMX generation, plus real local Kimi CLI for architect review. `--runner-mode codex-kimi` is read-only: Codex plans and Kimi reviews, but Codex will not edit files between rounds. `--runner-mode codex` is a partial smoke that keeps Kimi deterministic.
+This creates the run, advances the local orchestrator, watches brief-driven progress, and prints a final brief plus Kimi/Codex negotiation summary. Codex proposals include draft planning artifacts, and consensusd writes `draft-prd-r*-*.md` and `draft-test-spec-r*-*.md` before Kimi review so the review target is concrete from round 1. Once consensus locks, Codex promotes the accepted drafts into the final artifact bundle: `prd-consensus-*.md`, `test-spec-consensus-*.md`, `consensus-omx-*.md`, and `context-bridge-*.md`. It does not dump the full transcript unless you add `--show-transcript`. `--runner-mode codex-kimi-edit` uses real `codex exec` for proposals, scoped revision passes, and OMX generation, plus real local Kimi CLI for architect review. `--runner-mode codex-kimi` is read-only: Codex plans and Kimi reviews, but Codex will not edit files between rounds. `--runner-mode codex` is a partial smoke that keeps Kimi deterministic.
 
 ## CLI
 
@@ -204,9 +206,11 @@ export CONSENSUSD_SUBPROCESS_TIMEOUT_SEC=3600
 uv run consensusd up --project-root . --db .consensusd/consensusd.sqlite --runner-mode codex-kimi-edit --subprocess-timeout-sec 3600
 ```
 
-Codex proposal prompts receive a bounded deep context packet before the subprocess starts: explicit objective commit diff when present, optional `user_session_context`, relevant P11B/Revolut artifacts, filtered package/test context, and capped repo-local file contents. If the objective names a commit, consensusd intentionally excludes unrelated current-HEAD commit metadata. If session context is present and no commit is named, consensusd omits git evidence entirely and uses the session context plus bounded relevant file contents. For P11B/Revolut/read-only reviews, it also front-loads the P11B artifact bundle: guard, tests, collector skeleton, PRD/test/final OMX plans, key-governance/control artifacts, wiki/research, and validation summaries. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--ephemeral` so user hooks, skills, repo rules, and MCP config do not accidentally turn a planner pass into a full interactive workflow.
+Codex proposal prompts receive a bounded deep context packet before the subprocess starts: explicit objective commit diff when present, optional `user_session_context`, relevant P11B/Revolut artifacts, filtered package/test context, and capped repo-local file contents. If the objective names a commit, consensusd intentionally excludes unrelated current-HEAD commit metadata. If session context is present and no commit is named, consensusd omits git evidence entirely and uses the session context plus bounded relevant file contents. For P11B/Revolut/read-only reviews, it also front-loads the P11B artifact bundle: guard, tests, collector skeleton, PRD/test/final OMX plans, key-governance/control artifacts, wiki/research, and validation summaries. Codex should understand that packet deeply, inspect only a small number of named extra files if needed, and record missing external facts rather than inventing them. Every real proposal must include `CONSENSUSD:DRAFT_PRD_*` and `CONSENSUSD:DRAFT_TEST_SPEC_*` sections; consensusd validates them and records `proposal_draft_quality` before Kimi reviews. Nested `codex exec` runner calls use `--ignore-user-config`, `--ignore-rules`, and `--json`; consensusd captures the Codex `thread_id` and resumes it for later Codex planning/OMX phases. The runner intentionally does not use `--ephemeral` because that would destroy round-to-round continuity.
 
-Kimi review prompts receive an additional `.omx/context/kimi-review-packet-*.md` before each review round. The packet front-loads the proposal under review, prior critique, current diff, changed files, relevant file contents, raw verification/runner evidence, and Kimi's approval checklist. This is designed to reduce avoidable ping-pong by making round 1 evidence inspectable instead of making Kimi ask for it later.
+Kimi review prompts receive an additional `.omx/context/kimi-review-packet-*.md` before each review round. The packet front-loads the proposal under review, draft PRD/test-spec artifacts, prior critique, current diff, changed files, relevant file contents, raw verification/runner evidence, and Kimi's approval checklist. This is designed to reduce avoidable ping-pong by making round 1 evidence inspectable instead of making Kimi ask for it later.
+
+Kimi CLI prints a `kimi -r <session-id>` resume hint after review. consensusd stores that id in SQLite and uses it on later Kimi rounds, so Kimi gets both its prior in-memory session and the durable evidence packet. If a resume id is unavailable, consensusd still falls back to the full SQLite transcript and evidence packet rather than guessing.
 
 ## Editable Mode Guardrails
 
@@ -252,6 +256,7 @@ Covered behavior includes valid/invalid transitions, run creation, proposal subm
 - Ralph execution is still mocked behind the approval gate.
 - Real subprocess runners require local `codex` and `kimi` CLIs to be installed and usable without interactive credential prompts.
 - Editable mode lets Codex change files before consensus lock. Use read-only `codex-kimi` mode when you only want planning/review before Ralph.
+- Codex editable revision passes may use a separate workspace-write Codex session because `codex exec resume` resumes the original session sandbox. The surrounding proposal/review/OMX phases still carry continuity through the persisted planning session plus the SQLite transcript.
 - Admin endpoints are unauthenticated in v1 and intended for localhost development.
 
 ## Roadmap

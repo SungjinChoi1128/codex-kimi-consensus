@@ -2,16 +2,25 @@ from __future__ import annotations
 
 from typing import Optional
 
+from consensusd.db import Database
 from consensusd.models import Evidence, Proposal, Review, ReviewDecision, ReviewStatus, Run
-from consensusd.runners.subprocess_utils import phase_artifact_paths, run_cancellable_command
+from consensusd.runners.subprocess_utils import (
+    combined_result_text,
+    extract_kimi_session_id,
+    phase_artifact_paths,
+    run_cancellable_command,
+)
 from consensusd.settings import Settings
+
+KIMI_SESSION_ROLE = "kimi_reviewer"
 
 
 class SubprocessKimiRunner:
     """Future Kimi CLI runner with configurable command surface."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, db: Optional[Database] = None):
         self.settings = settings
+        self.db = db
 
     def generate_proposal(self, run: Run, prior_review: Optional[Review], evidence: list[Evidence]) -> str:
         raise NotImplementedError("Kimi does not generate proposals")
@@ -25,7 +34,10 @@ class SubprocessKimiRunner:
             "Your job is to enrich the shared context, challenge weak assumptions, and provide advisory review material "
             "that Codex must adjudicate.\n"
             f"{context_instruction}\n"
-            "Return a critical, evidence-grounded architecture review at the level of an OMX/Kimi plan review.\n\n"
+            "Return a critical, evidence-grounded architecture review at the level of an OMX/Kimi plan review. "
+            "Review the concrete Codex draft PRD and draft test spec sections, not just the narrative proposal. "
+            "If the proposal lacks `CONSENSUSD:DRAFT_PRD_*` or `CONSENSUSD:DRAFT_TEST_SPEC_*` sections, treat that as "
+            "a Critical Issue unless the objective is explicitly not a planning-bundle review.\n\n"
             f"Run ID: {run.run_id}\n"
             f"Objective: {run.objective}\n"
             f"Round: {run.current_round}\n"
@@ -41,6 +53,9 @@ class SubprocessKimiRunner:
             "## Critical Issues (Must Resolve Before Handoff)\n"
             "Use C1, C2, C3... headings. Each issue must include Problem, Risk, Required resolution, "
             "and concrete evidence from files, commands, transcript, or missing artifacts.\n\n"
+            "## Draft PRD/Test Spec Review\n"
+            "Review whether the draft PRD and draft test spec are specific, internally consistent, implementable, and safe. "
+            "Name missing acceptance criteria, test cases, commands, fixtures, or evidence gates.\n\n"
             "## Major Issues (Should Resolve Before/During Implementation)\n"
             "Use M1, M2... headings for important non-blocking issues.\n\n"
             "## Minor Issues (Polish)\n"
@@ -51,22 +66,20 @@ class SubprocessKimiRunner:
             "List any decisions that require human or architect adjudication.\n\n"
             "## Evidence Expectations Before Approval\n"
             "List exact commands/files/artifacts that would prove resolution.\n\n"
-            "Do not approve unless all critical issues are resolved or explicitly accepted with constrained semantics. "
+            "Use REVIEW_STATUS: NEEDS_REVISION when a Critical Issue must be fixed before Ralph can safely execute. "
+            "Do not approve an implementation handoff by calling required fixes 'reservations'. "
+            "Only use REVIEW_STATUS: APPROVED with constrained semantics when the remaining critical items are explicitly "
+            "accepted non-execution constraints and the plan tells Ralph not to implement yet. "
             "Do not rewrite Codex's plan; write an advisory review that can become context enrichment."
         )
-        command = [
-            *self.settings.kimi_command,
-            "--quiet",
-            "-w",
-            run.project_root,
-            "-p",
-            prompt,
-        ]
         paths = phase_artifact_paths(run.project_root, run.run_id, "kimi.review", run.current_round)
         live_log_path = paths["live_log"]
+        session_id = self.db.get_runner_session(run.run_id, KIMI_SESSION_ROLE) if self.db else None
+        command = self._kimi_command(run, prompt, session_id)
+        resume_note = f" resume_session={session_id}" if session_id else ""
         print(
             f"[consensusd] run={run.run_id} phase=kimi.review starting "
-            f"timeout={_timeout_label(self.settings.subprocess_timeout_sec)} live_log={live_log_path}",
+            f"timeout={_timeout_label(self.settings.subprocess_timeout_sec)} live_log={live_log_path}{resume_note}",
             flush=True,
         )
         result = run_cancellable_command(
@@ -81,6 +94,7 @@ class SubprocessKimiRunner:
             f"pid={result.pid} returncode={result.returncode} live_log={result.live_log_path}",
             flush=True,
         )
+        self._record_session(run, result)
         content = (result.stdout or "").strip()
         if result.returncode != 0:
             details = (result.stderr or result.stdout or "").strip()
@@ -93,6 +107,34 @@ class SubprocessKimiRunner:
 
     def generate_omx(self, run: Run, consensus_proposal: Proposal, evidence: list[Evidence]) -> str:
         raise NotImplementedError("Kimi does not generate OMX plans")
+
+    def _kimi_command(self, run: Run, prompt: str, session_id: Optional[str]) -> list[str]:
+        command = [
+            *self.settings.kimi_command,
+            "--quiet",
+            "-w",
+            run.project_root,
+        ]
+        if session_id:
+            command.extend(["-r", session_id])
+        command.extend(["-p", prompt])
+        return command
+
+    def _record_session(self, run: Run, result) -> None:
+        if not self.db:
+            return
+        session_id = extract_kimi_session_id(combined_result_text(result))
+        if not session_id:
+            return
+        self.db.upsert_runner_session(
+            run.run_id,
+            KIMI_SESSION_ROLE,
+            session_id,
+            source="kimi resume hint",
+            phase="kimi.review",
+            round=run.current_round,
+            event_type="kimi.session.updated",
+        )
 
 
 def _format_evidence(evidence: list[Evidence]) -> str:
@@ -124,10 +166,13 @@ def _review_context_instruction(evidence: list[Evidence]) -> str:
             "If evidence includes `user_session_context`, treat it as a scoped human/Codex session hint, not as proof. "
             "Use it to understand the user's recent Ralph/reporting flow, then verify claims against the supplied bounded "
             "file contents and explicit evidence. Do not pull review scope from current git status, current HEAD, or "
-            "unrelated cleanup/tooling commits unless those git facts are explicitly present in the evidence packet."
+            "unrelated cleanup/tooling commits unless those git facts are explicitly present in the evidence packet. "
+            "If `context_quality_profile` reports `quality_failures`, treat them as missing-evidence blockers unless "
+            "the proposal explicitly scopes around them."
         )
     return (
         packet_instruction +
         "Verify claims against the supplied repository evidence. If a specific fact is missing, mark it as missing evidence "
-        "instead of widening scope implicitly."
+        "instead of widening scope implicitly. If `context_quality_profile` reports `quality_failures`, treat them as "
+        "missing-evidence blockers unless the proposal explicitly scopes around them."
     )

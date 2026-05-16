@@ -138,8 +138,30 @@ def _print_brief(data: dict[str, object]) -> None:
             print(f"- {path}")
     if data.get("omx_plan_path"):
         print(f"\nOMX plan: {data['omx_plan_path']}")
+    if data.get("prd_path"):
+        print(f"PRD: {data['prd_path']}")
+    if data.get("test_spec_path"):
+        print(f"Test spec: {data['test_spec_path']}")
+    quality = data.get("plan_artifact_quality") or {}
+    if isinstance(quality, dict) and quality:
+        status = quality.get("status")
+        print(f"Plan artifact quality: {status}")
+        failures = quality.get("failures") or []
+        if failures:
+            print("Plan artifact quality failures")
+            for failure in failures:
+                print(f"- {failure}")
     if data.get("context_bridge_path"):
         print(f"Context bridge: {data['context_bridge_path']}")
+    if data.get("ralph_handoff_status"):
+        print(f"\nRalph handoff status: {data['ralph_handoff_status']}")
+    if data.get("ralph_handoff_blockers"):
+        print("\nRalph handoff blockers")
+        for blocker in data["ralph_handoff_blockers"]:
+            print(f"- {blocker}")
+    if data.get("ralph_handoff_guide"):
+        print("\nRalph handoff guide")
+        print(str(data["ralph_handoff_guide"]))
     if data.get("ralph_handoff_prompt"):
         print("\nCodex CLI Ralph handoff prompt")
         print(str(data["ralph_handoff_prompt"]))
@@ -549,11 +571,6 @@ if typer is not None:
             "--subprocess-timeout-sec",
             help="Timeout for real Codex/Kimi subprocess phases. Use 0 for unlimited. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
         ),
-        session_context: Optional[str] = typer.Option(
-            None,
-            "--session-context",
-            help="Recent user/Codex session summary to pass as scoped review context.",
-        ),
     ) -> None:
         """Start the localhost daemon."""
         start_command(project_root, db, host, port, dev_auth_role, runner_mode, subprocess_timeout_sec)
@@ -599,6 +616,11 @@ if typer is not None:
             None,
             "--subprocess-timeout-sec",
             help="Timeout for real Codex/Kimi subprocess phases. Use 0 for unlimited. Defaults to CONSENSUSD_SUBPROCESS_TIMEOUT_SEC or 3600.",
+        ),
+        session_context: Optional[str] = typer.Option(
+            None,
+            "--session-context",
+            help="Recent user/Codex session summary to pass as scoped review context.",
         ),
     ) -> None:
         """Start, watch, and print an approval-gated review in one Codex-friendly command."""

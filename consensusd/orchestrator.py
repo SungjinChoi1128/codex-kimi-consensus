@@ -24,6 +24,15 @@ from .state_machine import is_terminal
 
 T = TypeVar("T")
 
+PRD_START = "<!-- CONSENSUSD:PRD_START -->"
+PRD_END = "<!-- CONSENSUSD:PRD_END -->"
+TEST_SPEC_START = "<!-- CONSENSUSD:TEST_SPEC_START -->"
+TEST_SPEC_END = "<!-- CONSENSUSD:TEST_SPEC_END -->"
+DRAFT_PRD_START = "<!-- CONSENSUSD:DRAFT_PRD_START -->"
+DRAFT_PRD_END = "<!-- CONSENSUSD:DRAFT_PRD_END -->"
+DRAFT_TEST_SPEC_START = "<!-- CONSENSUSD:DRAFT_TEST_SPEC_START -->"
+DRAFT_TEST_SPEC_END = "<!-- CONSENSUSD:DRAFT_TEST_SPEC_END -->"
+
 
 def runner_name(runner: AgentRunner) -> str:
     return runner.__class__.__name__
@@ -59,11 +68,11 @@ class Orchestrator:
         if runner_mode == "mock":
             return MockCodexRunner(), MockKimiRunner()
         if runner_mode == "codex":
-            return SubprocessCodexRunner(self.settings), MockKimiRunner()
+            return SubprocessCodexRunner(self.settings, db=self.db), MockKimiRunner()
         if runner_mode == "codex-kimi":
-            return SubprocessCodexRunner(self.settings), SubprocessKimiRunner(self.settings)
+            return SubprocessCodexRunner(self.settings, db=self.db), SubprocessKimiRunner(self.settings, db=self.db)
         if runner_mode == "codex-kimi-edit":
-            return SubprocessCodexRunner(self.settings, editable=True), SubprocessKimiRunner(self.settings)
+            return SubprocessCodexRunner(self.settings, editable=True, db=self.db), SubprocessKimiRunner(self.settings, db=self.db)
         raise ValueError(f"unsupported runner mode: {runner_mode}")
 
     def _codex_for(self, run: Run) -> AgentRunner:
@@ -201,6 +210,7 @@ class Orchestrator:
             if is_terminal(self.db.get_run(run.run_id).status):
                 return
             self.db.add_proposal(run.run_id, run.current_round, content, runner=runner_name(runner))
+            self._record_proposal_draft_bundle(run, content)
             self._record_repo_stat(run, "git_diff_stat_before_kimi_review")
             self._record_kimi_review_packet(run)
             latest = self.db.get_run(run.run_id)
@@ -256,8 +266,30 @@ class Orchestrator:
             )
             if is_terminal(self.db.get_run(run.run_id).status):
                 return
-            plan_path = self._write_omx_plan(run, content)
-            self._phase_event(run, "codex.omx.written", runner=runner_name(runner), path=plan_path)
+            artifact_paths = self._write_plan_artifact_bundle(run, content)
+            plan_path = artifact_paths["omx_plan_path"]
+            self._phase_event(run, "codex.omx.written", runner=runner_name(runner), path=plan_path, **artifact_paths)
+            quality = validate_plan_artifact_bundle(
+                content,
+                Path(artifact_paths["prd_path"]).read_text(),
+                Path(artifact_paths["test_spec_path"]).read_text(),
+            )
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                "plan_artifact_bundle",
+                "OK",
+                json.dumps(artifact_paths, sort_keys=True),
+                command="consensusd wrote OMX/PRD/test-spec artifact bundle",
+            )
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                "plan_artifact_quality",
+                quality["status"],
+                json.dumps(quality, sort_keys=True),
+                command="consensusd validated OMX/PRD/test-spec artifact quality gates",
+            )
             self.db.add_omx_plan(run.run_id, content, runner=runner_name(runner), path=plan_path)
             latest = self.db.get_run(run.run_id)
             self.db.transition_run(run.run_id, RunStatus.OMX_GENERATED, expected_version=latest.version)
@@ -504,6 +536,16 @@ class Orchestrator:
     def _ensure_context_bridge(self, run: Run) -> None:
         transcript = self.db.transcript(run.run_id)
         if transcript.context_bridges:
+            if not any(item.kind == "context_bridge" for item in transcript.evidence):
+                bridge = transcript.context_bridges[-1]
+                self.db.add_evidence(
+                    run.run_id,
+                    run.current_round,
+                    "context_bridge",
+                    "OK",
+                    f"Bridge path: {bridge.path}\n\n{bridge.content}",
+                    command="consensusd generated Kimi-Codex context bridge",
+                )
             return
         path = self._context_bridge_path(run)
         content = build_context_bridge_markdown(transcript, path)
@@ -511,6 +553,14 @@ class Orchestrator:
         bridge_path.parent.mkdir(parents=True, exist_ok=True)
         bridge_path.write_text(content)
         self.db.add_context_bridge(run.run_id, str(bridge_path), content)
+        self.db.add_evidence(
+            run.run_id,
+            run.current_round,
+            "context_bridge",
+            "OK",
+            f"Bridge path: {bridge_path}\n\n{content}",
+            command="consensusd generated Kimi-Codex context bridge",
+        )
 
     def _context_bridge_path(self, run: Run) -> str:
         plans_dir = Path(run.project_root) / ".omx" / "plans"
@@ -523,12 +573,180 @@ class Orchestrator:
         path.write_text(content)
         return str(path)
 
+    def _write_plan_artifact_bundle(self, run: Run, content: str) -> dict[str, str]:
+        plans_dir = Path(run.project_root) / ".omx" / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        omx_path = Path(self._write_omx_plan(run, content))
+        prd_path = plans_dir / compact_artifact_name("prd-consensus", run)
+        test_spec_path = plans_dir / compact_artifact_name("test-spec-consensus", run)
+        prd_path.write_text(
+            extract_marked_section(content, PRD_START, PRD_END)
+            or fallback_prd(run, content, str(omx_path))
+        )
+        test_spec_path.write_text(
+            extract_marked_section(content, TEST_SPEC_START, TEST_SPEC_END)
+            or fallback_test_spec(run, content, str(omx_path))
+        )
+        return {
+            "omx_plan_path": str(omx_path),
+            "prd_path": str(prd_path),
+            "test_spec_path": str(test_spec_path),
+        }
+
+    def _record_proposal_draft_bundle(self, run: Run, content: str) -> None:
+        plans_dir = Path(run.project_root) / ".omx" / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        prd_content = extract_marked_section(content, DRAFT_PRD_START, DRAFT_PRD_END)
+        test_spec_content = extract_marked_section(content, DRAFT_TEST_SPEC_START, DRAFT_TEST_SPEC_END)
+        artifact_paths: dict[str, str] = {}
+        if prd_content:
+            prd_path = plans_dir / compact_artifact_name(f"draft-prd-r{run.current_round}", run)
+            prd_path.write_text(prd_content)
+            artifact_paths["draft_prd_path"] = str(prd_path)
+        if test_spec_content:
+            test_spec_path = plans_dir / compact_artifact_name(f"draft-test-spec-r{run.current_round}", run)
+            test_spec_path.write_text(test_spec_content)
+            artifact_paths["draft_test_spec_path"] = str(test_spec_path)
+        if artifact_paths:
+            self.db.add_evidence(
+                run.run_id,
+                run.current_round,
+                "proposal_draft_artifact_bundle",
+                "OK",
+                json.dumps(artifact_paths, sort_keys=True),
+                command="consensusd wrote Codex draft PRD/test-spec artifacts before Kimi review",
+            )
+        quality = validate_draft_plan_bundle(content)
+        self.db.add_evidence(
+            run.run_id,
+            run.current_round,
+            "proposal_draft_quality",
+            quality["status"],
+            json.dumps(quality, sort_keys=True),
+            command="consensusd validated Codex proposal draft PRD/test-spec gates",
+        )
+
 
 def parse_utc_iso(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def extract_marked_section(content: str, start_marker: str, end_marker: str) -> str:
+    start = content.find(start_marker)
+    end = content.find(end_marker)
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return content[start + len(start_marker) : end].strip() + "\n"
+
+
+def fallback_prd(run: Run, content: str, omx_plan_path: str) -> str:
+    return (
+        f"# PRD - Consensus Review {run.run_id[-8:]}\n\n"
+        "## Status\n"
+        "Generated fallback PRD because the Codex OMX output did not include a marked PRD section. "
+        "Treat this as a blocker for production Ralph handoff quality.\n\n"
+        "## Objective\n"
+        f"{run.objective}\n\n"
+        "## Source Plan\n"
+        f"`{omx_plan_path}`\n\n"
+        "## Product Requirements\n"
+        "- Preserve the consensus scope and non-goals exactly as recorded in the OMX plan.\n"
+        "- Do not widen safety, authentication, credential, network, or execution boundaries beyond the reviewed plan.\n"
+        "- Convert every Kimi critical issue into a concrete acceptance criterion before implementation.\n\n"
+        "## Full Consensus Plan Excerpt\n"
+        "```markdown\n"
+        f"{content[:6000]}\n"
+        "```\n"
+    )
+
+
+def fallback_test_spec(run: Run, content: str, omx_plan_path: str) -> str:
+    return (
+        f"# Test Spec - Consensus Review {run.run_id[-8:]}\n\n"
+        "## Status\n"
+        "Generated fallback test spec because the Codex OMX output did not include a marked test-spec section. "
+        "Treat this as a blocker for production Ralph handoff quality.\n\n"
+        "## Objective\n"
+        f"{run.objective}\n\n"
+        "## Source Plan\n"
+        f"`{omx_plan_path}`\n\n"
+        "## Required Verification\n"
+        "- Run the exact verification commands listed in the OMX plan.\n"
+        "- Add targeted regression tests for every accepted implementation change.\n"
+        "- Prove any deferred Kimi issue is recorded as a non-goal or future blocker before handoff.\n\n"
+        "## Full Consensus Plan Excerpt\n"
+        "```markdown\n"
+        f"{content[:6000]}\n"
+        "```\n"
+    )
+
+
+def validate_plan_artifact_bundle(omx_content: str, prd_content: str, test_spec_content: str) -> dict[str, object]:
+    failures: list[str] = []
+    if PRD_START not in omx_content or PRD_END not in omx_content:
+        failures.append("missing_prd_markers")
+    if TEST_SPEC_START not in omx_content or TEST_SPEC_END not in omx_content:
+        failures.append("missing_test_spec_markers")
+    if "generated fallback" in prd_content.lower():
+        failures.append("fallback_prd_generated")
+    if "generated fallback" in test_spec_content.lower():
+        failures.append("fallback_test_spec_generated")
+    failures.extend(missing_required_headings("prd", prd_content, ["problem", "goals", "non-goals", "requirements", "acceptance criteria"]))
+    failures.extend(
+        missing_required_headings(
+            "test_spec",
+            test_spec_content,
+            ["test matrix", "negative tests", "command", "evidence capture", "pass"],
+        )
+    )
+    if len(prd_content.split()) < 120:
+        failures.append("prd_too_thin")
+    if len(test_spec_content.split()) < 100:
+        failures.append("test_spec_too_thin")
+    return {
+        "status": "FAILED" if failures else "OK",
+        "failures": failures,
+        "prd_word_count": len(prd_content.split()),
+        "test_spec_word_count": len(test_spec_content.split()),
+    }
+
+
+def validate_draft_plan_bundle(proposal_content: str) -> dict[str, object]:
+    prd_content = extract_marked_section(proposal_content, DRAFT_PRD_START, DRAFT_PRD_END)
+    test_spec_content = extract_marked_section(proposal_content, DRAFT_TEST_SPEC_START, DRAFT_TEST_SPEC_END)
+    failures: list[str] = []
+    if not prd_content:
+        failures.append("missing_draft_prd_markers")
+    if not test_spec_content:
+        failures.append("missing_draft_test_spec_markers")
+    if prd_content:
+        failures.extend(missing_required_headings("draft_prd", prd_content, ["problem", "goals", "non-goals", "requirements", "acceptance criteria"]))
+        if len(prd_content.split()) < 120:
+            failures.append("draft_prd_too_thin")
+    if test_spec_content:
+        failures.extend(
+            missing_required_headings(
+                "draft_test_spec",
+                test_spec_content,
+                ["test matrix", "negative tests", "command", "evidence capture", "pass"],
+            )
+        )
+        if len(test_spec_content.split()) < 100:
+            failures.append("draft_test_spec_too_thin")
+    return {
+        "status": "FAILED" if failures else "OK",
+        "failures": failures,
+        "draft_prd_word_count": len(prd_content.split()),
+        "draft_test_spec_word_count": len(test_spec_content.split()),
+    }
+
+
+def missing_required_headings(kind: str, content: str, headings: list[str]) -> list[str]:
+    lowered = content.lower()
+    return [f"{kind}_missing_{heading.replace(' ', '_')}" for heading in headings if heading not in lowered]
 
 
 def build_context_bridge_markdown(transcript, path: str) -> str:
@@ -703,6 +921,8 @@ def build_kimi_review_packet_markdown(transcript, path: str) -> str:
         [
             "## Kimi Approval Gate Checklist",
             "",
+            "- Review the Codex draft PRD and draft test spec as concrete artifacts, not as future promises.",
+            "- Treat `proposal_draft_quality=FAILED` as a blocker unless Codex explicitly scopes the run away from PRD/test-spec output.",
             "- Verify the proposal against the actual diff and file contents above.",
             "- Do not accept narrative claims without matching source, artifact, or raw command evidence.",
             "- If approval is blocked only by missing evidence, name the exact evidence field or path that should be added.",
@@ -716,7 +936,7 @@ def kimi_review_packet_paths(transcript, changed_files: list[str]) -> list[str]:
     paths: list[str] = []
     paths.extend(changed_files)
     for item in transcript.evidence:
-        if item.kind in {"deep_context_file_inventory", "user_session_context", "kimi_review_packet"}:
+        if item.kind in {"deep_context_file_inventory", "user_session_context", "kimi_review_packet", "proposal_draft_artifact_bundle"}:
             paths.extend(extract_context_file_paths(item.output))
     for proposal in transcript.proposals[-2:]:
         paths.extend(extract_context_file_paths(proposal.content))
@@ -899,9 +1119,9 @@ def run_fixed_git_command(project_root: str, command: str) -> tuple[str, str]:
 
 
 EvidenceItem = dict[str, str]
-DEEP_CONTEXT_CHAR_LIMIT = 120_000
-DEEP_CONTEXT_FILE_LIMIT = 24
-DEEP_CONTEXT_PER_FILE_LIMIT = 20_000
+DEEP_CONTEXT_CHAR_LIMIT = 220_000
+DEEP_CONTEXT_FILE_LIMIT = 48
+DEEP_CONTEXT_PER_FILE_LIMIT = 28_000
 RELEVANT_NAME_RE = re.compile(r"(p11b|revolut|readonly|read-only|collector|guard|control-template|key-governance)", re.I)
 CONTEXT_PATH_RE = re.compile(
     r"(?<![\w/.-])((?:\.?[\w.-]+/)+[\w.@:+-]+\.(?:json|toml|yaml|yml|mjs|cjs|js|ts|md|txt))(?!\w)"
@@ -912,22 +1132,28 @@ P11B_ARTIFACT_GLOBS = (
     "scripts/revolut_x_p11b_readonly_collector_skeleton.mjs",
     "tests/revolut-x-readonly-collector-guard.test.mjs",
     ".omx/plans/*p11b*.md",
-    ".omx/plans/*revolut*.md",
     ".omx/security/*p11b*",
-    ".omx/security/*revolut*",
-    ".omx/security/*readonly*",
     ".omx/control/*p11b*",
-    ".omx/control/*revolut*",
-    ".omx/control/*readonly*",
     ".omx/context/*p11b*.md",
     ".omx/research/**/*p11b*",
     ".omx/research/**/*revolut*",
     ".omx/validation/**/*p11b*",
-    ".omx/validation/**/*revolut*",
     ".omx/validation/*p11b*/*",
-    ".omx/validation/*revolut*/*",
     "omx_wiki/*p11b*.md",
-    "omx_wiki/*revolut*.md",
+)
+P11B_CORE_CONTEXT_PATHS = (
+    "src/data/revolut-x-readonly-collector-guard.mjs",
+    "scripts/revolut_x_p11b_readonly_collector_skeleton.mjs",
+    "tests/revolut-x-readonly-collector-guard.test.mjs",
+    ".omx/plans/prd-p11b-authenticated-read-only-data-contract.md",
+    ".omx/plans/test-spec-p11b-authenticated-read-only-data-contract.md",
+    ".omx/plans/final-p11b-authenticated-read-only-data-contract.md",
+    ".omx/security/revolut-x-readonly-key-governance.md",
+    ".omx/security/revolut-x-p11b-key-governance.md",
+    ".omx/security/revolut-x-readonly-control-template.json",
+    ".omx/control/revolut-x-p11b-readonly-control-template.json",
+    ".omx/research/p11b-groundwork/revolut-x-official-tooling-audit.md",
+    "omx_wiki/p11b-authenticated-read-only-data-contract.md",
 )
 TEXT_SUFFIXES = {
     ".js",
@@ -955,7 +1181,9 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
     items: list[EvidenceItem] = []
     files: list[str] = []
     session_files = extract_context_file_paths(session_context or "")
-    p11b_files = discover_p11b_artifact_files(root) if wants_p11b_context(objective, session_context) else []
+    include_p11b = wants_p11b_context(objective, session_context)
+    p11b_core_files = discover_existing_files(root, P11B_CORE_CONTEXT_PATHS) if include_p11b else []
+    p11b_files = discover_p11b_artifact_files(root) if include_p11b else []
     commit_refs = extract_commit_refs(objective)[:2]
     if commit_refs:
         items.append(
@@ -988,12 +1216,39 @@ def build_deep_context_evidence(project_root: str, objective: str, session_conte
             )
     if session_files:
         files.extend(session_files)
+        files.extend(p11b_core_files)
         files.extend(p11b_files)
     elif p11b_files:
+        files.extend(p11b_core_files)
         files.extend(p11b_files)
     else:
         files.extend(discover_relevant_context_files(root))
     files = unique_preserve_order(file for file in files if safe_context_file(root, file))[:DEEP_CONTEXT_FILE_LIMIT]
+    if include_p11b:
+        items.append(
+            {
+                "kind": "context_quality_profile",
+                "status": "OK" if p11b_context_quality_failures(root, files) == [] else "PARTIAL",
+                "command": "consensusd P11B context coverage profile",
+                "output": json.dumps(
+                    {
+                        "profile": "p11b_deep",
+                        "file_limit": DEEP_CONTEXT_FILE_LIMIT,
+                        "char_limit": DEEP_CONTEXT_CHAR_LIMIT,
+                        "per_file_limit": DEEP_CONTEXT_PER_FILE_LIMIT,
+                        "session_context_paths": session_files,
+                        "core_paths_expected": list(P11B_CORE_CONTEXT_PATHS),
+                        "core_paths_present": p11b_core_files,
+                        "included_files": files,
+                        "missing_core_paths": [path for path in P11B_CORE_CONTEXT_PATHS if (root / path).is_file() and path not in files],
+                        "absent_core_paths": [path for path in P11B_CORE_CONTEXT_PATHS if not (root / path).is_file()],
+                        "quality_failures": p11b_context_quality_failures(root, files),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+            }
+        )
     if files:
         items.append(
             {
@@ -1046,6 +1301,40 @@ def discover_p11b_artifact_files(root: Path) -> list[str]:
             if path.is_file():
                 paths.append(path.relative_to(root).as_posix())
     return sorted(unique_preserve_order(paths), key=context_file_rank)
+
+
+def discover_existing_files(root: Path, paths: tuple[str, ...]) -> list[str]:
+    return [path for path in paths if safe_context_file(root, path)]
+
+
+def p11b_context_quality_failures(root: Path, included_files: list[str]) -> list[str]:
+    included = set(included_files)
+    groups = {
+        "missing_guard_source": ("src/data/revolut-x-readonly-collector-guard.mjs",),
+        "missing_guard_tests": ("tests/revolut-x-readonly-collector-guard.test.mjs",),
+        "missing_collector_skeleton": ("scripts/revolut_x_p11b_readonly_collector_skeleton.mjs",),
+        "missing_prd_or_final_plan": (
+            ".omx/plans/prd-p11b-authenticated-read-only-data-contract.md",
+            ".omx/plans/final-p11b-authenticated-read-only-data-contract.md",
+        ),
+        "missing_test_spec": (".omx/plans/test-spec-p11b-authenticated-read-only-data-contract.md",),
+        "missing_key_governance": (
+            ".omx/security/revolut-x-readonly-key-governance.md",
+            ".omx/security/revolut-x-p11b-key-governance.md",
+        ),
+        "missing_control_template": (
+            ".omx/security/revolut-x-readonly-control-template.json",
+            ".omx/control/revolut-x-p11b-readonly-control-template.json",
+        ),
+    }
+    failures: list[str] = []
+    for failure, candidates in groups.items():
+        existing = [path for path in candidates if (root / path).is_file()]
+        if not existing:
+            failures.append(failure)
+        elif not any(path in included for path in existing):
+            failures.append(failure)
+    return failures
 
 
 def extract_context_file_paths(text: str) -> list[str]:

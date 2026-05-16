@@ -62,6 +62,20 @@ def test_mock_orchestrator_full_run_to_approval_gate(tmp_path):
     assert Path(transcript.context_bridges[-1].path).name.startswith("context-bridge-")
     assert len(Path(transcript.omx_plans[-1].path).name) < 80
     assert len(Path(transcript.context_bridges[-1].path).name) < 80
+    artifact_evidence = [item for item in transcript.evidence if item.kind == "plan_artifact_bundle"]
+    assert artifact_evidence
+    artifact_paths = json.loads(artifact_evidence[-1].output)
+    assert Path(artifact_paths["prd_path"]).name.startswith("prd-consensus-")
+    assert Path(artifact_paths["test_spec_path"]).name.startswith("test-spec-consensus-")
+    assert Path(artifact_paths["prd_path"]).exists()
+    assert Path(artifact_paths["test_spec_path"]).exists()
+    assert "PRD - Mock Consensus Review" in Path(artifact_paths["prd_path"]).read_text()
+    assert "Test Spec - Mock Consensus Review" in Path(artifact_paths["test_spec_path"]).read_text()
+    quality_evidence = [item for item in transcript.evidence if item.kind == "plan_artifact_quality"]
+    assert quality_evidence
+    quality = json.loads(quality_evidence[-1].output)
+    assert quality["status"] == "OK"
+    assert quality["failures"] == []
     bridge = transcript.context_bridges[-1]
     assert "Kimi-Codex Context Bridge" in bridge.content
     assert "Review Cycle Summary" in bridge.content
@@ -71,6 +85,10 @@ def test_mock_orchestrator_full_run_to_approval_gate(tmp_path):
     assert "Kimi Review Evidence Packet" in packets[-1].output
     packet_path = packets[-1].output.splitlines()[0].removeprefix("Packet path: ")
     assert Path(packet_path).exists()
+    bridge_evidence = [item for item in transcript.evidence if item.kind == "context_bridge"]
+    assert bridge_evidence
+    assert "Review Cycle Summary" in bridge_evidence[-1].output
+    assert "NEEDS_REVISION" in bridge_evidence[-1].output
     assert service.db.path.exists()
 
 
@@ -496,8 +514,13 @@ def test_session_context_adds_p11b_artifact_bundle_without_git_scope(tmp_path):
     )
     by_kind = {item["kind"]: item for item in evidence}
     inventory = by_kind["deep_context_file_inventory"]["output"]
+    quality = json.loads(by_kind["context_quality_profile"]["output"])
 
     assert by_kind["deep_context_file_inventory"]["command"] == "P11B artifact bundle"
+    assert by_kind["context_quality_profile"]["status"] == "PARTIAL"
+    assert quality["profile"] == "p11b_deep"
+    assert quality["file_limit"] >= 48
+    assert "missing_collector_skeleton" in quality["quality_failures"]
     assert "src/data/revolut-x-readonly-collector-guard.mjs" in inventory
     assert "tests/revolut-x-readonly-collector-guard.test.mjs" in inventory
     assert ".omx/plans/final-p11b-authenticated-read-only-data-contract.md" in inventory

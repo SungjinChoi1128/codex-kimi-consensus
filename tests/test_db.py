@@ -70,3 +70,34 @@ def test_proposal_and_review_persistence(tmp_path):
     assert transcript.reviews == [review]
     assert transcript.events[-2].event_type == "proposal.created"
     assert transcript.events[-1].event_type == "review.created"
+
+
+def test_runner_session_persistence_is_durable_and_audited(tmp_path):
+    db = Database(tmp_path / "consensus.sqlite")
+    db.init()
+    run = db.create_run("review this", str(tmp_path), "approval-gated")
+
+    db.upsert_runner_session(
+        run.run_id,
+        "kimi_reviewer",
+        "11111111-1111-4111-8111-111111111111",
+        source="kimi resume hint",
+        phase="kimi.review",
+        round=1,
+        event_type="kimi.session.updated",
+    )
+    db.upsert_runner_session(
+        run.run_id,
+        "kimi_reviewer",
+        "22222222-2222-4222-8222-222222222222",
+        source="kimi resume hint",
+        phase="kimi.review",
+        round=2,
+        event_type="kimi.session.updated",
+    )
+
+    assert db.get_runner_session(run.run_id, "kimi_reviewer") == "22222222-2222-4222-8222-222222222222"
+    events = db.transcript(run.run_id).events
+    session_events = [event for event in events if event.event_type == "kimi.session.updated"]
+    assert len(session_events) == 2
+    assert [event.sequence for event in events] == sorted(event.sequence for event in events)

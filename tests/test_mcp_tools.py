@@ -1,4 +1,5 @@
 import contextlib
+import json
 import socket
 import threading
 import time
@@ -343,6 +344,19 @@ def test_consensus_brief_shows_codex_cli_ralph_handoff_prompt_at_approval_gate(t
     bridge_path = tmp_path / ".omx" / "plans" / "context-bridge-test.md"
     service.db.add_omx_plan(run.run_id, "plan", path=str(plan_path))
     service.db.add_context_bridge(run.run_id, str(bridge_path), "bridge")
+    service.db.add_evidence(
+        run.run_id,
+        run.current_round,
+        "plan_artifact_bundle",
+        "OK",
+        json.dumps(
+            {
+                "omx_plan_path": str(plan_path),
+                "prd_path": str(tmp_path / ".omx" / "plans" / "prd-consensus-test.md"),
+                "test_spec_path": str(tmp_path / ".omx" / "plans" / "test-spec-consensus-test.md"),
+            }
+        ),
+    )
 
     brief = service.tool_get_consensus_brief(run.run_id)
 
@@ -350,7 +364,115 @@ def test_consensus_brief_shows_codex_cli_ralph_handoff_prompt_at_approval_gate(t
     assert brief["ralph_handoff_prompt"].startswith("$ralph Execute the approved consensus OMX plan")
     assert ".omx/plans/consensus-omx-test.md" in brief["ralph_handoff_prompt"]
     assert ".omx/plans/context-bridge-test.md" in brief["ralph_handoff_prompt"]
+    assert brief["prd_path"].endswith("prd-consensus-test.md")
+    assert brief["test_spec_path"].endswith("test-spec-consensus-test.md")
+    assert brief["ralph_handoff_status"] == "ready"
     assert "approve_ralph_handoff records the consensusd audit gate" in brief["ralph_handoff_note"]
+
+
+def test_consensus_brief_blocks_ralph_prompt_for_acceptance_only_plan(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("review P11B guard hardening", str(tmp_path), "approval-gated")
+    run = transition_to_approval_gate(service, run)
+    plan_path = tmp_path / ".omx" / "plans" / "consensus-omx-p11b.md"
+    bridge_path = tmp_path / ".omx" / "plans" / "context-bridge-p11b.md"
+    service.db.add_omx_plan(
+        run.run_id,
+        (
+            "# OMX Plan\n\n"
+            "Next safest step: lock acceptance criteria only.\n"
+            "Do not proceed to P11B.2, authenticated requests, credential access, or Ralph implementation yet.\n"
+            "No implementation authorized until skeleton integration tests and URL port restrictions are scoped."
+        ),
+        path=str(plan_path),
+    )
+    service.db.add_context_bridge(
+        run.run_id,
+        str(bridge_path),
+        (
+            "## Critical Issues (Must Resolve Before Handoff)\n\n"
+            "C1 Problem: npm test was blocked. Required resolution: get fresh npm test.\n"
+            "C2 Problem: skeleton integration tests are missing."
+        ),
+    )
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["ralph_handoff_status"] == "blocked"
+    assert brief["ralph_handoff_prompt"] is None
+    assert any("acceptance-criteria-only" in blocker for blocker in brief["ralph_handoff_blockers"])
+    assert any("numbered critical" in blocker.lower() for blocker in brief["ralph_handoff_blockers"])
+    assert "Do not launch Ralph" in brief["ralph_handoff_guide"]
+    assert "blocked" in brief["ralph_handoff_note"]
+    assert brief["next_action"].startswith("Do not approve Ralph handoff yet")
+
+
+def test_consensus_brief_honors_blocked_handoff_decision(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("real smoke no-op", str(tmp_path), "approval-gated")
+    run = transition_to_approval_gate(service, run)
+    plan_path = tmp_path / ".omx" / "plans" / "consensus-omx-smoke.md"
+    service.db.add_omx_plan(
+        run.run_id,
+        (
+            "# OMX Plan\n\n"
+            "No implementation is required or authorized. Ralph must remain paused.\n\n"
+            "## Ralph Handoff Decision\n\n"
+            "Decision: BLOCKED\n"
+        ),
+        path=str(plan_path),
+    )
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["ralph_handoff_status"] == "blocked"
+    assert brief["ralph_handoff_prompt"] is None
+    assert any("Decision" in blocker or "blocked" in blocker.lower() for blocker in brief["ralph_handoff_blockers"])
+
+
+def test_consensus_brief_does_not_block_on_empty_critical_issues_heading(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("ready implementation", str(tmp_path), "approval-gated")
+    run = transition_to_approval_gate(service, run)
+    plan_path = tmp_path / ".omx" / "plans" / "consensus-omx-ready.md"
+    service.db.add_omx_plan(run.run_id, "Decision: READY\n\nImplementation steps are concrete.", path=str(plan_path))
+    service.db.add_context_bridge(
+        run.run_id,
+        str(tmp_path / ".omx" / "plans" / "context-bridge-ready.md"),
+        "## Critical Issues (Must Resolve Before Handoff)\n\n*None. All evidence-grounded claims hold.*\n\n## Major Issues\nNone.",
+    )
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["ralph_handoff_status"] == "ready"
+    assert brief["ralph_handoff_prompt"] is not None
+    assert not any("critical" in blocker.lower() for blocker in brief["ralph_handoff_blockers"])
+
+
+def test_consensus_brief_blocks_failed_plan_artifact_quality(tmp_path):
+    settings, app = make_app(tmp_path)
+    service = app.state.service
+    run = service.db.create_run("bad artifacts", str(tmp_path), "approval-gated")
+    run = transition_to_approval_gate(service, run)
+    plan_path = tmp_path / ".omx" / "plans" / "consensus-omx-bad.md"
+    service.db.add_omx_plan(run.run_id, "Decision: READY\n\nImplementation steps are concrete.", path=str(plan_path))
+    service.db.add_evidence(
+        run.run_id,
+        run.current_round,
+        "plan_artifact_quality",
+        "FAILED",
+        json.dumps({"status": "FAILED", "failures": ["missing_prd_markers", "test_spec_too_thin"]}),
+    )
+
+    brief = service.tool_get_consensus_brief(run.run_id)
+
+    assert brief["ralph_handoff_status"] == "blocked"
+    assert brief["ralph_handoff_prompt"] is None
+    assert brief["plan_artifact_quality"]["status"] == "FAILED"
+    assert any("quality gates failed" in blocker.lower() for blocker in brief["ralph_handoff_blockers"])
 
 
 def test_watch_consensus_progress_returns_codex_friendly_samples(tmp_path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -473,10 +474,24 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
     latest_proposal = transcript.proposals[-1] if transcript.proposals else None
     latest_plan = transcript.omx_plans[-1] if transcript.omx_plans else None
     latest_bridge = transcript.context_bridges[-1] if transcript.context_bridges else None
+    plan_artifacts = latest_plan_artifact_bundle(transcript.evidence)
+    plan_artifact_quality = latest_plan_artifact_quality(transcript.evidence)
     ralph_prompt = build_ralph_handoff_prompt(
         run,
         latest_plan.path if latest_plan else None,
         latest_bridge.path if latest_bridge else None,
+        latest_plan.content if latest_plan else "",
+        latest_bridge.content if latest_bridge else "",
+        latest_review.content if latest_review else "",
+        plan_artifact_quality,
+    )
+    ralph_readiness = ralph_handoff_readiness(
+        run.status.value,
+        bool(latest_plan),
+        latest_plan.content if latest_plan else "",
+        latest_bridge.content if latest_bridge else "",
+        latest_review.content if latest_review else "",
+        plan_artifact_quality,
     )
     latest_change = latest_evidence(transcript.evidence, "editable_change_summary")
     change_summary = parse_json(latest_change.output) if latest_change else {}
@@ -517,10 +532,20 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
         "changed_files": change_summary.get("changed_files", []),
         "guardrail_violations": change_summary.get("violations", []),
         "omx_plan_path": latest_plan.path if latest_plan else None,
+        "prd_path": plan_artifacts.get("prd_path"),
+        "test_spec_path": plan_artifacts.get("test_spec_path"),
+        "plan_artifact_quality": plan_artifact_quality,
         "context_bridge_path": latest_bridge.path if latest_bridge else None,
+        "ralph_handoff_status": ralph_readiness["status"],
+        "ralph_handoff_blockers": ralph_readiness["blockers"],
+        "ralph_handoff_guide": ralph_readiness["guide"],
         "ralph_handoff_prompt": ralph_prompt,
-        "ralph_handoff_note": ralph_handoff_note(run.status.value, bool(latest_plan)),
-        "next_action": next_action(run.status.value, latest_review.status.value if latest_review else None),
+        "ralph_handoff_note": ralph_handoff_note(run.status.value, bool(latest_plan), ralph_readiness["status"]),
+        "next_action": next_action(
+            run.status.value,
+            latest_review.status.value if latest_review else None,
+            ralph_readiness["status"],
+        ),
         "phase_events": phase_events[-10:],
         "artifact_counts": {
             "proposals": len(transcript.proposals),
@@ -532,10 +557,28 @@ def build_consensus_brief(transcript) -> dict[str, Any]:
     }
 
 
-def build_ralph_handoff_prompt(run, plan_path: Optional[str], bridge_path: Optional[str]) -> Optional[str]:
+def build_ralph_handoff_prompt(
+    run,
+    plan_path: Optional[str],
+    bridge_path: Optional[str],
+    plan_content: str = "",
+    bridge_content: str = "",
+    review_content: str = "",
+    plan_artifact_quality: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     if run.status != RunStatus.AWAITING_HUMAN_APPROVAL:
         return None
     if not plan_path:
+        return None
+    readiness = ralph_handoff_readiness(
+        run.status.value,
+        True,
+        plan_content,
+        bridge_content,
+        review_content,
+        plan_artifact_quality,
+    )
+    if readiness["status"] != "ready":
         return None
     plan_ref = project_relative_path(run.project_root, plan_path)
     bridge_ref = project_relative_path(run.project_root, bridge_path) if bridge_path else None
@@ -555,11 +598,82 @@ def build_ralph_handoff_prompt(run, plan_path: Optional[str], bridge_path: Optio
     return "\n".join(lines)
 
 
-def ralph_handoff_note(status: str, has_plan: bool) -> Optional[str]:
+def ralph_handoff_readiness(
+    status: str,
+    has_plan: bool,
+    plan_content: str = "",
+    bridge_content: str = "",
+    review_content: str = "",
+    plan_artifact_quality: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if status != RunStatus.AWAITING_HUMAN_APPROVAL.value:
+        return {"status": "not_at_gate", "blockers": [], "guide": None}
+    if not has_plan:
+        return {
+            "status": "blocked",
+            "blockers": ["No OMX plan path is recorded yet."],
+            "guide": "Ralph handoff is blocked until Codex records an OMX plan.",
+        }
+
+    combined = "\n".join([plan_content, bridge_content, review_content]).lower()
+    blocker_patterns = [
+        ("OMX plan marks Ralph handoff as blocked", "decision: blocked"),
+        ("no Ralph implementation is authorized", "no ralph implementation"),
+        ("plan says no implementation is authorized", "no implementation authorized"),
+        ("plan says no implementation is required or authorized", "no implementation is required or authorized"),
+        ("plan says not to proceed to P11B.2/authenticated work", "do not proceed to p11b.2"),
+        ("plan says not to start authenticated requests", "do not start authenticated"),
+        ("plan is acceptance-criteria-only", "acceptance criteria only"),
+        ("plan says to pause before implementation", "pause before implementation"),
+        ("plan says Ralph must remain paused", "ralph must remain paused"),
+        ("plan says Ralph remains paused", "ralph remains paused"),
+        ("mock runner output is not a production Ralph handoff", "do not pass this mock plan to ralph"),
+        ("mock runner output is not a production implementation plan", "not a production implementation plan"),
+    ]
+    blockers = [message for message, pattern in blocker_patterns if pattern in combined]
+    if plan_artifact_quality and plan_artifact_quality.get("status") == "FAILED":
+        failures = plan_artifact_quality.get("failures") or []
+        blockers.append(f"Plan artifact quality gates failed: {', '.join(failures) if failures else 'unknown failure'}.")
+    if has_numbered_critical_issue(combined):
+        blockers.append("Kimi recorded numbered critical items that must be resolved before handoff.")
+
+    if blockers:
+        guide = (
+            "Do not launch Ralph from this run yet. Treat the consensus output as a safety gate, "
+            "then start a narrowed implementation task only after the blockers are converted into concrete scope. "
+            "For P11B-style reviews, the next prompt should ask for the specific guard/test hardening named by Kimi "
+            "and must keep credentials, network calls, and P11B.2 out of scope."
+        )
+        return {"status": "blocked", "blockers": sorted(set(blockers)), "guide": guide}
+
+    return {
+        "status": "ready",
+        "blockers": [],
+        "guide": "Paste ralph_handoff_prompt into Codex CLI to start Ralph with the approved plan.",
+    }
+
+
+def has_numbered_critical_issue(text: str) -> bool:
+    for match in re.finditer(r"critical issues[^\n]*", text):
+        section = text[match.end() : match.end() + 2000]
+        next_major = section.find("## major")
+        if next_major != -1:
+            section = section[:next_major]
+        if re.search(r"(^|\n)\s*(c\d+\b|\*\*c\d+\b|###\s*c\d+\b)", section):
+            return True
+    return False
+
+
+def ralph_handoff_note(status: str, has_plan: bool, readiness_status: str = "ready") -> Optional[str]:
     if status != RunStatus.AWAITING_HUMAN_APPROVAL.value:
         return None
     if not has_plan:
         return "Ralph handoff is paused, but no OMX plan path is recorded yet."
+    if readiness_status != "ready":
+        return (
+            "Ralph handoff is blocked by the plan/review content. "
+            "Use ralph_handoff_guide and blockers to narrow the next engineering task first."
+        )
     return (
         "Paste ralph_handoff_prompt into Codex CLI to start Ralph. "
         "approve_ralph_handoff records the consensusd audit gate; it does not itself run Ralph."
@@ -578,6 +692,20 @@ def project_relative_path(project_root: str, path: Optional[str]) -> str:
 def latest_evidence(evidence, kind: str):
     matches = [item for item in evidence if item.kind == kind]
     return matches[-1] if matches else None
+
+
+def latest_plan_artifact_bundle(evidence) -> dict[str, Any]:
+    item = latest_evidence(evidence, "plan_artifact_bundle")
+    if not item:
+        return {}
+    return parse_json(item.output)
+
+
+def latest_plan_artifact_quality(evidence) -> dict[str, Any]:
+    item = latest_evidence(evidence, "plan_artifact_quality")
+    if not item:
+        return {}
+    return parse_json(item.output)
 
 
 def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
@@ -606,7 +734,13 @@ def progress_sample(brief: dict[str, Any]) -> dict[str, Any]:
         "last_kimi_summary": brief.get("last_kimi_summary"),
         "last_codex_summary": brief.get("last_codex_summary"),
         "omx_plan_path": brief.get("omx_plan_path"),
+        "prd_path": brief.get("prd_path"),
+        "test_spec_path": brief.get("test_spec_path"),
+        "plan_artifact_quality": brief.get("plan_artifact_quality", {}),
         "context_bridge_path": brief.get("context_bridge_path"),
+        "ralph_handoff_status": brief.get("ralph_handoff_status"),
+        "ralph_handoff_blockers": brief.get("ralph_handoff_blockers", []),
+        "ralph_handoff_guide": brief.get("ralph_handoff_guide"),
         "ralph_handoff_prompt": brief.get("ralph_handoff_prompt"),
         "ralph_handoff_note": brief.get("ralph_handoff_note"),
         "artifact_counts": brief.get("artifact_counts", {}),
@@ -637,8 +771,10 @@ def current_phase(status: str, phase_events: list[dict[str, Any]]) -> str:
     return status
 
 
-def next_action(status: str, last_kimi_status: Optional[str]) -> str:
+def next_action(status: str, last_kimi_status: Optional[str], ralph_readiness_status: Optional[str] = None) -> str:
     if status == RunStatus.AWAITING_HUMAN_APPROVAL.value:
+        if ralph_readiness_status == "blocked":
+            return "Do not approve Ralph handoff yet; use the blockers and guide to narrow the next engineering task."
         return "Review the OMX plan and approve Ralph handoff when ready."
     if status == RunStatus.FAILED.value:
         return "Inspect the latest Kimi review, editable change summary, and error before restarting."

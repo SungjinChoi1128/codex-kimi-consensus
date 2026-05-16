@@ -142,6 +142,16 @@ class Database:
                   status TEXT NOT NULL,
                   created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS runner_sessions (
+                  run_id TEXT NOT NULL REFERENCES runs(run_id),
+                  role TEXT NOT NULL,
+                  session_id TEXT NOT NULL,
+                  source TEXT NOT NULL,
+                  phase TEXT NULL,
+                  round INTEGER NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(run_id, role)
+                );
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
@@ -409,6 +419,53 @@ class Database:
             if not row:
                 raise RuntimeError("event append failed")
             return self._event(row)
+
+    def get_runner_session(self, run_id: str, role: str) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT session_id FROM runner_sessions WHERE run_id = ? AND role = ?",
+                (run_id, role),
+            ).fetchone()
+        return str(row["session_id"]) if row else None
+
+    def upsert_runner_session(
+        self,
+        run_id: str,
+        role: str,
+        session_id: str,
+        *,
+        source: str,
+        phase: Optional[str] = None,
+        round: Optional[int] = None,
+        event_type: str = "runner_session.updated",
+    ) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runner_sessions(run_id, role, session_id, source, phase, round, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, role) DO UPDATE SET
+                  session_id = excluded.session_id,
+                  source = excluded.source,
+                  phase = excluded.phase,
+                  round = excluded.round,
+                  updated_at = excluded.updated_at
+                """,
+                (run_id, role, session_id, source, phase, round, now),
+            )
+            self._append_event(
+                conn,
+                run_id,
+                event_type,
+                {
+                    "role": role,
+                    "session_id": session_id,
+                    "source": source,
+                    "phase": phase,
+                    "round": round,
+                },
+            )
 
     def latest_proposal(self, run_id: str) -> Optional[Proposal]:
         with self.connect() as conn:
